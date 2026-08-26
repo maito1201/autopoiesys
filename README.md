@@ -42,7 +42,7 @@ Claude Codeでこのディレクトリを開き:
 結果に不満があれば、それを一言伝えるだけでよい:
 
 ```
-node cli/index.js feedback "この結果は駄目だった"
+/run-feedback この結果は駄目だった
 ```
 
 `/investigate-failure` が Root Cause →「なぜOSはこれを防げなかったか」→
