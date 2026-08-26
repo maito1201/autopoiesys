@@ -1,89 +1,97 @@
 # autopoiesys — Intelligence OS Builder
 
-高価なLLM推論を使い捨てず、ルール・Query・評価器・検出器という再利用可能な資産に変換して
-蓄積する「知性のOS」を、目的を一言伝えるだけで自動構築するOSS。
-OSは使うほど賢く安くなり、失敗のたびに「なぜOSはこれを防げなかったか」まで遡って自らを作り替える。
-完了判定はエージェントではなくOSが下す。
+LLMエージェントの仕事には2つの根深い問題がある。**未完了でも「完了しました」と言うこと**、
+そして**高価な推論の結果がセッションごとに捨てられること**だ。
+
+autopoiesysは、あなたの目的を一言聞くと、その目的専用の「Intelligence OS」を
+調査・設計・構築するOSSである。作られたOSはエージェントの自己申告を信用せず
+独立評価で完了を認定し、失敗のたびに検出器と回帰テストを蓄積して、
+使うほど賢く・安くなっていく。
+
+対象領域は事前定義しない。エンジニアリング、経営判断、カスタマーサポート — 同じエンジンで構築できる。
+
+> **ステータス**: 実験段階のMVP。構築 → 実行 → 独立評価 → 失敗学習の閉ループまで動作する。
+> Claude Codeで動作確認済み（他のAgent Skill対応環境は未検証）。
+
+## 動きのイメージ
 
 ```
-LLM = Intelligence generator / Researcher
-OS  = Accumulated intelligence + execution environment
+あなた:       /init-os
+エージェント:  何を達成したいですか？
+あなた:       このリポジトリのバグ修正を、人間の介入なしで安全に回せるようになりたい
+エージェント:  （最大5問のヒアリング → 目的定義 .os/goal.yaml を提案）
+あなた:       承認
+エージェント:  対象を調査し、制約・仮説・不明点を知識として蓄積。
+              文脈の取得窓口（Query）と「完了」の判定器（評価器）を生成 — OS完成
+
+あなた:       /run-task issue #12 を修正して
+エージェント:  修正 → OSが独立評価（テスト実行・制約検査・要件判定）→ PASS → 完了
+
+あなた:       /run-feedback この修正、タイムアウト設定を壊してた
+エージェント:  失敗として記録 → 原因と「なぜOSは防げなかったか」を分析 →
+              新しい検出器＋回帰テストを提案（あなたの承認後に適用）
+              → 同じ失敗は次からLLMなしで自動検出される
 ```
-
-コンセプト全文は [CONCEPT.md](CONCEPT.md)、設計判断と代替案の検討は
-[docs/DESIGN.md](docs/DESIGN.md)、`.os/` の形式契約は [SCHEMA.md](SCHEMA.md)。
-
-## 必要環境
-
-- Node.js >= 20（それ以外の依存ゼロ。`npm install` 不要）
-- git（推奨。履歴の観測とOSバージョン管理に使う）
-- Claude Code等のAgent Skill対応LLMエージェント（OS Builderの知的動作を担う）
-
-Windows / macOS / Linux で動作する。CLIは常に
-`node cli/index.js <cmd> [--flags]` の1形式で、シェル構文（パイプ・リダイレクト）を使わない。
 
 ## クイックスタート
 
-```
-git clone <このリポジトリ>
-cd autopoiesys
-node cli/index.js doctor
-```
-
-Claude Codeでこのディレクトリを開き:
+必要なもの: Node.js 20以上・git・Claude Code（`npm install` は不要）。
 
 ```
-/init-os
+git clone https://github.com/maito1201/autopoiesys
 ```
 
-ヒアリング → `goal.yaml` → ユーザー承認の後、`/discover-domain` → `/build-query-system` →
-`/build-evaluation-model` でOSが構築され、`/run-task` で仕事が始まる。
+Claude Codeでこのディレクトリを開き、`/init-os` と打つ。
+あとは上の「動きのイメージ」のとおり、エージェントが質問と提案をしてくるので、
+答えて・承認して・仕事を頼めばよい。
 
-結果に不満があれば、それを一言伝えるだけでよい:
+構築コストの目安: このリポジトリ自身を対象にしたデモでは、OS構築＋タスク1件＋
+失敗学習1周で約8万トークンだった。以後は蓄積が効くほどタスクあたりの消費が下がる。
 
-```
-/run-feedback この結果は駄目だった
-```
+## 勝手なことはしない
 
-`/investigate-failure` が Root Cause →「なぜOSはこれを防げなかったか」→
-OS Upgrade提案（新しい検出器 + 回帰テスト）まで自律的に進める。
+- gitへのコミットは行わない
+- 書き込み先は `.os/`（あなた専用のOS本体）の中だけ。あなたのコードに触るのは、
+  あなたが依頼したタスクの作業だけ
+- OSが自分自身を作り替える変更は、常に「提案 → あなたの承認 → 回帰テスト」の順
+- やり直したくなったら `.os/` を削除すれば白紙に戻る
 
-## アーキテクチャ
+## コマンド一覧
 
-```
-┌────────────────────────────── OSS Core（このリポジトリ・領域非依存）─┐
-│  skills/     OS BuilderのAgent Skill群（知的動作。LLMが実行）        │
-│  cli/ core/  決定的コア（Node.js依存ゼロ。LLM呼び出しゼロ）          │
-│  SCHEMA.md   .os/ 形式契約（format_versionで版管理）                 │
-└──────────────────────────────────────────────────────────────────────┘
-                     │ 生成・操作（契約はSCHEMA.mdとCLIのみ）
-                     ▼
-┌────────────────────────────── ユーザー固有OS（.os/・完全分離）──────┐
-│  goal.yaml         Goal Specification（成功基準→評価器に接地）       │
-│  world_model/      Statementイベントログ（事実/仮説/不明を区別）     │
-│  queries/          宣言的Query定義（max_tokens強制）                 │
-│  evaluators/       独立評価器（deterministic / command / llm_judge） │
-│  failures/         Failure状態機械（ログ死蔵をlintで禁止）           │
-│  golden_tasks/     回帰テスト（検出力テスト付き）                    │
-│  observations/     Token Ledger・Query実行記録                       │
-└──────────────────────────────────────────────────────────────────────┘
-```
+| コマンド | 何が起きるか |
+|---|---|
+| `/init-os` | 環境診断 → 目的と運用のヒアリング → 目的定義（承認制） |
+| `/discover-domain` | 対象領域を調査し、知識を構造化して蓄積 |
+| `/build-query-system` | 知識の取得窓口（Query）を生成 |
+| `/build-evaluation-model` | 「完了」の判定器（評価器）を生成 |
+| `/run-task <依頼>` | タスク実行。完了はOSの独立評価が認定する |
+| `/run-feedback <不満>` | 一言の不満を失敗として記録（分析はあなたの仕事ではない） |
+| `/investigate-failure` | 失敗の原因と「なぜ防げなかったか」を分析し、改善を提案 |
+| `/upgrade-os` | 承認済みの改善を適用し、回帰テストで検証 |
 
-設計の柱（詳細は docs/DESIGN.md）:
-
-1. **独立評価** — Agentの「完了しました」はどのコードパスでも使われない。
-   決定的評価のFAILはLLM判定で覆せない
-2. **Failure状態機械** — 全Failureは root cause と why_undetected（なぜOSは防げなかったか）
-   を経て、最低1つの回帰テストと1つの検出器を残すまで完了できない
-3. **Token Economics** — 文脈はmax_tokens強制のQuery経由のみ。T3（高性能LLM）の出力は
-   構造化findingsに限定され `autopoiesys compile` で資産化。全LLM消費はToken Ledgerで計測
-4. **進化** — golden task回帰・検出力テスト・os_versionにより、OS自体が安全に作り替わる
-
-## CLI
+## 仕組み（1分）
 
 ```
-node cli/index.js help
+目的 → ヒアリング → 調査 → OS構築（知識 + Query + 評価器）
+   → タスク実行 ⇄ 独立評価 → 失敗 → 学習（検出器 + 回帰テスト）
+   → 同じ失敗はLLMなしで検出 → OSが賢く・安くなる → …
 ```
+
+蓄積はすべて `.os/` 配下のプレーンテキスト（YAML/JSONL）で、変化はgit diffで監査できる。
+設計の柱は4つ:
+
+1. **独立評価** — エージェントの「完了しました」はどのコードパスでも使われない
+2. **失敗の資産化** — 全失敗は、原因分析と検出器・回帰テストを残すまで完了できない
+3. **Token Economics** — 高価な推論は構造化された知識に変換して再利用し、消費は常時計測
+4. **進化** — OS自身の変更も回帰テストで守られ、安全に作り替わる
+
+詳細: 使い方は [docs/USAGE.md](docs/USAGE.md)、設計判断は [docs/DESIGN.md](docs/DESIGN.md)、
+データ形式は [SCHEMA.md](SCHEMA.md)、思想の全文は [CONCEPT.md](CONCEPT.md)。
+
+## 自分のプロジェクトで使う
+
+OSはワークスペースごとに1つ。別の目的のOSは別リポジトリに作る
+（手順は [docs/USAGE.md](docs/USAGE.md) §11）。
 
 ## テスト
 
