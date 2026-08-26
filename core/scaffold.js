@@ -44,6 +44,7 @@ budgets:
   research_tokens: 200000
 strict_vocabulary: false
 stale_after_days: 7
+regression_every_days: 7
 `;
 
 const GOAL_TEMPLATE = `# init-os Skillのヒアリングで生成する。手で書く場合はSCHEMA.md参照。

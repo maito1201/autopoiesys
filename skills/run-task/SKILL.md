@@ -54,6 +54,12 @@ Task → Code → Done ではなく、Objective → Plan → Execute → Evaluat
 
        node cli/index.js ledger add --purpose run-task --tier T2 --tokens-in <n> --tokens-out <n> --task <id>
 
+## 運用ヒントの中継
+
+CLI出力に「ヒント:」「警告:」で始まる行（regression推奨・Failure滞留）が含まれていたら、
+省略せずユーザーにそのまま伝える。マニュアルを読まないユーザーに運用を届ける経路なので、
+握りつぶさないこと。
+
 ## 禁止事項
 
 - 自分の判断でタスクをDONE扱いにすること（next-actionがDONEを返すまで完了ではない）

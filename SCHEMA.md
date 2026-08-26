@@ -38,6 +38,7 @@ Core はここに定義された形式以外を読み書きしない。`.os/` �
 | observations/costs.jsonl | JSONL | Token Ledger |
 | observations/query_log.jsonl | JSONL | Query実行記録（切詰め・頻度） |
 | observations/research.jsonl | JSONL | Researchセッション開閉と産出資産 |
+| observations/regression.jsonl | JSONL | regression実行履歴（運用ヒント「そろそろregression」の判定基準） |
 
 ## goal.yaml
 
@@ -261,6 +262,7 @@ budgets:
   research_tokens: 200000
 strict_vocabulary: false
 stale_after_days: 7
+regression_every_days: 7   # この間隔を超えてregression未実行だと主要コマンドがヒントを出す
 ```
 
 ## Token Ledger（observations/costs.jsonl の1行）

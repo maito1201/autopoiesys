@@ -45,6 +45,11 @@ description: ユーザーの不満をヒアリングしてFailureとして起票
 
        node cli/index.js ledger add --purpose run-feedback --tier T1 --tokens-in <n> --tokens-out <n>
 
+## 運用ヒントの中継
+
+CLI出力に「ヒント:」「警告:」で始まる行（regression推奨・Failure滞留）が含まれていたら、
+省略せずユーザーにそのまま伝える。
+
 ## 禁止事項
 
 - ユーザーに原因分析・再現手順の作成を要求する（一言の不満で起票できるのがこのSkillの価値）

@@ -6,6 +6,12 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { loadEvaluatorDef, runDeterministic, runCommand } = require('./evaluate');
 const { listGoldenTasks, checkAll, loadConfig } = require('./schema');
+const { readJsonl, appendJsonl, nowIso } = require('./util');
+const { loadFailures, TERMINAL } = require('./failure');
+
+function regressionLog(osDir) {
+  return path.join(osDir, 'observations', 'regression.jsonl');
+}
 const { listQueries, loadQueryDef, runQuery } = require('./query');
 
 // Query定義に添付されたgolden（期待件数）を検証する — Query自体を回帰対象にする
@@ -93,7 +99,7 @@ function runRegression(osDir, { repoRoot, now } = {}) {
     && queryGoldens.every((q) => q.pass)
     && failureLint.length === 0
     && check.errors.length === 0;
-  return {
+  const result = {
     pass,
     golden_total: golden.length,
     golden_passed: golden.filter((g) => g.pass).length,
@@ -104,6 +110,55 @@ function runRegression(osDir, { repoRoot, now } = {}) {
     check_warnings: check.warnings,
     os_version: cfg.os_version,
   };
+  // 実行履歴を記録する（maintenanceHintsの「そろそろregression」判定の基準になる）
+  appendJsonl(regressionLog(osDir), {
+    ts: now || nowIso(),
+    pass,
+    golden_passed: result.golden_passed,
+    golden_total: result.golden_total,
+    failure_lint_count: failureLint.length,
+    os_version: cfg.os_version,
+  });
+  return result;
 }
 
-module.exports = { runRegression };
+// 普段のコマンド実行のついでに出す運用ヒント。マニュアルを読まないユーザーに
+// 「そろそろregression」を届けるための決定的チェック（LLMゼロ）。
+function maintenanceHints(osDir, { now } = {}) {
+  const hints = [];
+  let cfg;
+  try {
+    cfg = loadConfig(osDir);
+  } catch {
+    return hints;
+  }
+  const nowMs = now ? Date.parse(now) : Date.now();
+  const everyDays = cfg.regression_every_days || 7;
+  const staleDays = cfg.stale_after_days || 7;
+  const cmd = 'node cli/index.js regression';
+
+  const runs = readJsonl(regressionLog(osDir));
+  const last = runs[runs.length - 1];
+  const hasAssets = listGoldenTasks(osDir).length > 0 || Object.keys(loadFailures(osDir)).length > 0;
+  if (!last) {
+    if (hasAssets) hints.push(`ヒント: regressionが一度も実行されていない。 ${cmd} の実行を推奨`);
+  } else {
+    const days = Math.floor((nowMs - Date.parse(last.ts)) / 86400000);
+    if (days >= everyDays) {
+      hints.push(`ヒント: 前回のregressionから${days}日経過（推奨間隔${everyDays}日）。 ${cmd} の実行を推奨`);
+    }
+  }
+
+  for (const f of Object.values(loadFailures(osDir))) {
+    if (TERMINAL.includes(f.state)) continue;
+    const age = Math.floor((nowMs - Date.parse(f.reported_ts || f.ts)) / 86400000);
+    if (age > staleDays) {
+      hints.push(`警告: ${f.id} が${age}日滞留中（stale_after_days=${staleDays}超過）。このままではregressionが不合格になる。/investigate-failure で消化を`);
+    } else if (age >= Math.ceil(staleDays * 0.7)) {
+      hints.push(`ヒント: ${f.id} が${age}日未消化（あと${staleDays - age}日でregression不合格）。/investigate-failure の実行を検討`);
+    }
+  }
+  return hints;
+}
+
+module.exports = { runRegression, maintenanceHints };

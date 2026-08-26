@@ -108,6 +108,10 @@ golden tasks全件＋検出力テスト＋failure lint＋整合検査。FAILし�
 `/investigate-failure`。7日以上放置された失敗はregression自体を不合格にする仕様
 （失敗のログ死蔵を機械的に禁止している）。
 
+覚えていなくてもよい: 普段のコマンド（タスク登録・評価・feedback等）のついでに、
+regressionが`regression_every_days`（既定7日）を超えて未実行のときや、Failureの滞留が
+締め切りに近づいたとき、OSが「ヒント:」「警告:」として自分から知らせてくる。
+
 ## 6. 中身を理解したくなったら、この順に読む
 
 すべてプレーンテキストで、git diffで変化を追える。

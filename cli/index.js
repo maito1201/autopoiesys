@@ -61,6 +61,17 @@ function readJsonFile(p) {
   return JSON.parse(fs.readFileSync(path.resolve(String(p)), 'utf8'));
 }
 
+// 主要コマンドのついでに運用ヒント（そろそろregression等）を1〜数行出す。
+// ヒント生成の失敗は主機能を妨げない。
+function printHints(osDir) {
+  try {
+    const hints = regression.maintenanceHints(osDir);
+    if (hints.length) process.stdout.write('\n' + hints.join('\n') + '\n');
+  } catch {
+    // ignore
+  }
+}
+
 function out(obj, flags) {
   if (flags.json) {
     process.stdout.write(util.stableStringify(obj, 2) + '\n');
@@ -117,6 +128,7 @@ const COMMANDS = {
     const osDir = requireOsDir(args.flags);
     const r = schema.checkAll(osDir, { now: args.flags.now });
     out(r, args.flags);
+    printHints(osDir);
     return r.errors.length || r.failure_lint.length ? 1 : 0;
   },
 
@@ -171,6 +183,7 @@ const COMMANDS = {
       const evaluators = args.flags.evaluators ? String(args.flags.evaluators).split(',').map((s) => s.trim()).filter(Boolean) : [];
       const t = evaluate.newTask(osDir, objective, evaluators);
       out(t, args.flags);
+      printHints(osDir);
       return 0;
     }
     if (sub === 'list') {
@@ -218,6 +231,7 @@ const COMMANDS = {
         pending.map((p) => `  ${p.briefing}`).join('\n') + '\n'
       );
     }
+    printHints(osDir);
     return 0;
   },
 
@@ -236,6 +250,7 @@ const COMMANDS = {
     if (!taskId) throw new Error('使い方: autopoiesys next-action <taskId>');
     const r = evaluate.nextAction(osDir, String(taskId));
     out({ task: r.task, action: r.action, why: r.why, missing: r.missing }, args.flags);
+    printHints(osDir);
     return 0;
   },
 
@@ -254,6 +269,7 @@ const COMMANDS = {
     } else {
       process.stdout.write('\n未知のfingerprint。investigate-failure Skill（T3許可）で調査を開始すること。\n');
     }
+    printHints(osDir);
     return 0;
   },
 
