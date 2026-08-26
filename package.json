@@ -1,0 +1,16 @@
+{
+  "name": "autopoiesys",
+  "version": "0.1.0",
+  "description": "Intelligence OS Builder — 任意の高度な目的から、自律的に改善する専用Intelligence OSを構築するOSS",
+  "license": "MIT",
+  "bin": {
+    "autopoiesys": "cli/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {}
+}
