@@ -98,7 +98,11 @@ const COMMANDS = {
   init(args) {
     const dir = args.flags.dir ? path.resolve(String(args.flags.dir)) : process.cwd();
     const r = scaffold.initOs(dir, { force: !!args.flags.force });
-    out({ message: `.os/ を生成した: ${r.osDir}`, next: 'goal.yamlをヒアリング（init-os Skill）で埋め、autopoiesys validate で検証する' }, args.flags);
+    out({
+      message: `.os/ を生成した: ${r.osDir}`,
+      skill_stubs: `生成${r.skill_stubs.created.length}件 / 既存スキップ${r.skill_stubs.skipped.length}件（.claude/skills/）`,
+      next: '新しいスタブはClaude Codeの次回セッション起動から有効。/init-os のヒアリングでgoal.yamlを埋め、autopoiesys validate で検証する',
+    }, args.flags);
     return 0;
   },
 

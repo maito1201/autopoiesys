@@ -151,3 +151,24 @@ Coreを編集しない規約）。たまに覗いて、良い提案は通常のO
 - **タスク数を積む** — cheap_path_coverageの改善はトイ実証しかない。数十タスクで真偽が出る
 - **Phase 2: 第2ドメイン** — 非エンジニア領域（例: KPI監視）で `init` からOSをもう1つ
   作ると、コアがEngineer専用に歪んでいないかが検証できる。これがCONCEPTの汎用性の証明
+
+## 11. 別目的のOSを立ち上げる
+
+`.os/` はワークスペースに1つで、目的専用に染まる。**別目的のOSは別リポジトリに作る**:
+
+```bash
+mkdir ../my-new-os
+cd ../my-new-os
+git init
+git clone https://github.com/maito1201/autopoiesys autopoiesys
+node autopoiesys/cli/index.js init
+```
+
+（1行ずつ実行。bash / PowerShell 共通で動く）
+
+`init` が `.os/` に加えてスキルスタブ（`.claude/skills/`、OSS Coreへの参照パスは自動計算）
+も生成する。あとはClaude Codeをその新リポジトリで開き直して `/init-os` — 目的と運用の
+ヒアリングから、そのドメイン専用OSの構築が始まる。
+
+現在のディレクトリ（autopoiesysリポジトリ）の `.os/` は、autopoiesys開発用の
+Engineer OS専用として使い続ける。

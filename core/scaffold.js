@@ -4,8 +4,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { atomicWriteFile } = require('./util');
+const { atomicWriteFile, readTextFile } = require('./util');
 const { FORMAT_VERSION } = require('./schema');
+
+// このOSS Coreのルート（cli/index.jsやskills/の親）
+const OSS_ROOT = path.resolve(__dirname, '..');
 
 function doctor() {
   const report = { ok: true, checks: [] };
@@ -89,6 +92,61 @@ const OS_README = `# .os/ — ユーザー固有Intelligence OS
 OSS本体とは分離して、このディレクトリ自体を独立にバージョン管理することを推奨する。
 `;
 
+function parseFrontmatter(text) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+  if (!m) return {};
+  const out = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    const c = line.indexOf(':');
+    if (c > 0) {
+      let v = line.slice(c + 1).trim();
+      // 引用済みの値は中身だけ取り出す（二重引用の防止）
+      if (v.length >= 2 && ((v[0] === '"' && v[v.length - 1] === '"') || (v[0] === "'" && v[v.length - 1] === "'"))) {
+        v = v.slice(1, -1);
+      }
+      out[line.slice(0, c).trim()] = v;
+    }
+  }
+  return out;
+}
+
+// 対象ワークスペースにClaude Code用のスキルスタブ（.claude/skills/）を生成する。
+// 正本はOSS側 skills/ にあり、スタブは参照のみ（二重管理を避ける）。
+// OSS Coreがワークスペース外にある場合は絶対パスで参照する。
+function scaffoldSkillStubs(targetDir) {
+  const skillsRoot = path.join(OSS_ROOT, 'skills');
+  const created = [];
+  const skipped = [];
+  if (!fs.existsSync(skillsRoot)) return { created, skipped };
+  let ref = path.relative(targetDir, OSS_ROOT).split(path.sep).join('/');
+  if (ref.startsWith('..')) ref = OSS_ROOT.split(path.sep).join('/');
+  const prefix = ref === '' ? '' : `${ref}/`;
+  for (const entry of fs.readdirSync(skillsRoot, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!entry.isDirectory()) continue;
+    const canonical = path.join(skillsRoot, entry.name, 'SKILL.md');
+    if (!fs.existsSync(canonical)) continue;
+    const stub = path.join(targetDir, '.claude', 'skills', entry.name, 'SKILL.md');
+    if (fs.existsSync(stub)) {
+      skipped.push(entry.name); // 既存スタブ（ユーザーが調整済みの可能性）は上書きしない
+      continue;
+    }
+    const fm = parseFrontmatter(readTextFile(canonical));
+    atomicWriteFile(stub, [
+      '---',
+      `name: ${entry.name}`,
+      // JSONの二重引用文字列はYAMLのdouble-quoted scalarとして有効。
+      // 説明に「: 」や「#」が入ってもfrontmatterが壊れないようにする。
+      `description: ${JSON.stringify(String(fm.description || `${entry.name} skill`))}`,
+      '---',
+      '',
+      `このSkillの正本は \`${prefix}skills/${entry.name}/SKILL.md\` である。まずそれをReadで読み、その手順に厳密に従うこと。`,
+      '',
+    ].join('\n'));
+    created.push(entry.name);
+  }
+  return { created, skipped };
+}
+
 function initOs(targetDir, { force = false } = {}) {
   const osDir = path.join(targetDir, '.os');
   if (fs.existsSync(path.join(osDir, 'config.yaml')) && !force) {
@@ -99,13 +157,18 @@ function initOs(targetDir, { force = false } = {}) {
     'failures', 'golden_tasks', 'briefings', 'proposals', 'plugins', 'observations',
   ];
   for (const d of dirs) fs.mkdirSync(path.join(osDir, d), { recursive: true });
-  atomicWriteFile(path.join(osDir, 'config.yaml'), CONFIG_TEMPLATE);
-  if (!fs.existsSync(path.join(osDir, 'goal.yaml'))) {
-    atomicWriteFile(path.join(osDir, 'goal.yaml'), GOAL_TEMPLATE);
-  }
-  atomicWriteFile(path.join(osDir, 'world_model', 'vocabulary.yaml'), VOCABULARY_TEMPLATE);
-  atomicWriteFile(path.join(osDir, 'README.md'), OS_README);
-  return { osDir, created: dirs };
+  // 既存ファイルは上書きしない。--force での再実行は「不足分の補完と
+  // スタブの再生成」であり、調整済みのconfig・語彙・goalを巻き戻す操作ではない。
+  const writeIfAbsent = (rel, content) => {
+    const p = path.join(osDir, rel);
+    if (!fs.existsSync(p)) atomicWriteFile(p, content);
+  };
+  writeIfAbsent('config.yaml', CONFIG_TEMPLATE);
+  writeIfAbsent('goal.yaml', GOAL_TEMPLATE);
+  writeIfAbsent(path.join('world_model', 'vocabulary.yaml'), VOCABULARY_TEMPLATE);
+  writeIfAbsent('README.md', OS_README);
+  const stubs = scaffoldSkillStubs(targetDir);
+  return { osDir, created: dirs, skill_stubs: stubs };
 }
 
-module.exports = { doctor, initOs };
+module.exports = { doctor, initOs, scaffoldSkillStubs };
