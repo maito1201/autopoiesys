@@ -1,6 +1,6 @@
 # autopoiesys 設計書
 
-CONCEPT.md の「開発エージェントへの最初の指示」に従い、8つの検証項目それぞれについて
+初期構想文書（旧CONCEPT.md — 規範部分は末尾の付録に収録）の「開発エージェントへの最初の指示」に従い、8つの検証項目それぞれについて
 採用案・代替案・トレードオフを記す。本設計は独立した3設計案（A: LLM-as-runtime最小主義 /
 B: 決定的コア重視 / C: 進化ループ・Token Economics第一）を3名のジャッジ（concept-fidelity /
 portability / MVP実現性・進化性の各レンズ）で採点し統合したもの。判定は C勝利2票・B勝利1票。
@@ -183,7 +183,7 @@ implemented (assets必須: 最低1 golden_task + 1 検出系資産。regression�
   PR下書きを出力するだけで無断編集しない
 - `.os/` はOSS repoから物理分離（本repoでは .gitignore 対象）。ユーザー自身のgit repoとして
   独立に履歴管理・バックアップ・別マシン移行できる（§22の完全分離）
-- CONCEPT §21 の `os/generated/`（OSS repo内混在）は採らず、§22の `.os/` 分離を正とする
+- 設計原則§21 の `os/generated/`（OSS repo内混在）は採らず、§22の `.os/` 分離を正とする
 
 - 代替案: OSS repo内に生成物混在（ユーザーの機密ドメイン知識がOSS作業ツリーに混入、
   git pull更新も汚染）/ fork-per-user（upstream更新が取り込めず進化が分岐）/
@@ -288,7 +288,6 @@ Skillの正本は `skills/<name>/SKILL.md`。Claude Codeへの公開は `.claude
 
 ```
 autopoiesys/                  # OSS Core（ドメイン知識ゼロ）
-├── CONCEPT.md
 ├── README.md
 ├── SCHEMA.md                 # .os/ オンディスク形式契約（format_version管理）
 ├── docs/DESIGN.md            # 本書
@@ -320,3 +319,100 @@ autopoiesys/                  # OSS Core（ドメイン知識ゼロ）
 4. **JSONLスケール限界**: 10^5件超で増分再生+compaction（MVPスコープ外と明示）
 5. **自己ホストMVPの過適合**: Phase 2で非エンジニア領域の差し替えテストを必須関門に
 6. **並行書込み**: MVPは単一セッション単一ライター規約。gitを衝突検出器として使う
+
+---
+
+## 付録: 設計原則（旧CONCEPT.mdの章番号対応）
+
+本リポジトリのコード・スキル・ドキュメントに現れる「設計原則§n」という引用は、
+初期構想文書CONCEPT.md（役目を終えて削除済み）の章番号である。引用の解決先として、
+規範として効いている部分を以下に収録する。
+
+### §1 最重要コンセプト
+
+目的はLLMに大量のコンテキストを与えて賢く振る舞わせることではなく、高性能LLMの推論を
+再利用可能な構造・ルール・評価器・Query・Workflowへ変換し、目的領域固有の知性を
+蓄積すること。`LLM = Intelligence generator / OS = Accumulated intelligence + 実行環境`。
+日常業務では高価なLLMを使わず、未知の問題・重大な失敗・モデル限界の検出時のみ
+Deep Researchを実行する。
+
+### §6 World Model
+
+単なるKnowledge Graphにしない。世界について「何が事実で、何が仮説で、何が不明か」を
+区別し、Hypothesis・Evidence・反証・Confidence・関連Decision・過去Failureまで保持する。
+
+### §7 Query System
+
+World ModelをLLMに丸ごと渡さない。Queryは固定APIではなく、OS Builderが対象領域に
+応じて設計するもの。
+
+### §9-10 Evaluation / 「完了」の定義
+
+Agent自身の「完了しました」を信用しない。評価は独立に
+Artifact → Expected state → Evidence → Evaluation → PASS/FAIL/UNCERTAIN で行い、
+**Agentは仕事を実行するが、完了を認定するのはOS**。
+
+### §11 Next Action Engine
+
+評価結果から次の行動を決定する:
+PASS→DONE / FAIL→FIX / UNCERTAIN→INVESTIGATE / 証拠不足→COLLECT_EVIDENCE /
+モデル限界→DEEP_RESEARCH / 矛盾する証拠→RESOLVE_CONFLICT。
+
+### §12 Failure Learning
+
+OSの最大の資産は失敗。全失敗を Root Cause →「なぜ検出できなかったか」→
+何が欠けていたか（Knowledge / Query / Constraint / Test / Evaluator / Workflow / Model）
+まで分析し、OS Upgradeへ変換する。
+
+### §13 Failureから検出器を生成する
+
+失敗パターンを知識として保存して終わらせず、Detection / Prevention 戦略へ変換し、
+可能な限り安価な検出器（static analysis・lintルール・テスト・query・monitor・小型モデル）
+へコンパイルする。
+
+### §14 Token Economics
+
+高性能LLMの推論を raw reasoning のまま保存しない。knowledge → rule → query →
+evaluator → procedure へ変換し、将来の推論コストを減らす。理想は
+「初期: 高コスト推論が支配的 → 成熟後: 安価なランタイム＋少量の高コスト研究」。
+
+### §15 LLM Routing
+
+モデルを一種類に固定しない。Deterministic tools → Cheap → Mid → High-end の階層を持ち、
+High-endは未知の問題・重大な失敗・矛盾・高リスク意思決定・OS再設計のみに使う。
+
+### §16-17 OS Upgrade / Regression
+
+ユーザーの不満から、期待結果の再構成 → 実際との比較 → root cause → 系統的失敗の特定 →
+OS変更提案 → 実装 → 回帰評価まで自律実行する。重要ケースはGolden Taskとして保存し、
+OS更新のたびに全件で回帰評価する。
+
+### §18 OS Quality Metrics
+
+最重要指標は「人間が介入しなかった場合でも、最終状態が人間自身が仕事をした場合以上に
+なったか」。Human Intervention Rate・Cost/Task・Token消費・回帰率等を測定する。
+
+### §19 Self-Improvement Loop
+
+毎回Deep Researchしない。通常の更新は event → 決定的更新。未知は anomaly → 調査 →
+高性能LLM。重大な失敗は 高性能LLM → OS Upgrade。
+
+### §20-23 構成と分離
+
+OS BuilderはAgent Skill群として実装する（§20）。ユーザー固有OSは `.os/` に生成し、
+OSS本体と完全分離する（§21-22）。OSSコアは「何のOSを作るか」を知らず、
+Goal / World / Decision / Evidence / Evaluation / Failure / Learning / Action という
+抽象概念だけを扱う — Engineer OSも経営OSも同じエンジンで構築できる（§23）。
+
+### §26 絶対に避ける設計（禁止7項）
+
+1. **巨大なSystem Promptに領域知識を詰め込む** — 知識はWorld ModelとQueryに分離する
+2. **RAGだけで解決する** — 検索結果を渡すだけでなく、状態・仮説・Evidence・Decision・
+   Failureを構造化する
+3. **Agent自身に完了判定させる** — 独立したEvaluationを必須とする
+4. **Failureをログとして保存して終わる** — 必ずDetection / Prevention / OS Upgradeまで
+   検討する
+5. **毎回高性能LLMに全コンテキストを渡す** — Incremental Update・Targeted Query・
+   Model Routingを使用する
+6. **最初から完璧なOntologyを作る** — 実際のQuery需要・Failure・Decisionから進化させる
+7. **OS Upgradeを局所修正で終わらせる** — 「なぜOSはこの失敗を許したのか」まで遡る

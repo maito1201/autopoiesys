@@ -5,7 +5,7 @@ description: 対象領域に応じたQuery interfaceを設計・生成する。W
 
 # build-query-system
 
-QueryはOS Builderが領域に応じて設計するものであり、固定APIではない（CONCEPT §7）。
+QueryはOS Builderが領域に応じて設計するものであり、固定APIではない（設計原則§7）。
 このSkillの仕事はコードを書くことではなく、`.os/queries/<name>.yaml` の宣言的定義を
 設計・追加すること。実行は決定的Queryエンジンが行う。
 

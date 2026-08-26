@@ -1,6 +1,6 @@
 'use strict';
 // 宣言的Queryエンジン。World Model全体をLLMに渡す経路を作らないための唯一のアクセス面。
-// max_tokens はここで強制される（CONCEPT §26⑤）。
+// max_tokens はここで強制される（設計原則§26⑤）。
 const fs = require('node:fs');
 const path = require('node:path');
 const { getSnapshot } = require('./store');

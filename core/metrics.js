@@ -1,5 +1,5 @@
 'use strict';
-// OS Quality Metrics（CONCEPT §18）とToken Economicsの計測（§14）。
+// OS Quality Metrics（設計原則§18）とToken Economicsの計測（§14）。
 // Token Ledger・verdict台帳・query_logから集計し、コンパイル候補（metrics駆動コンパイル）を提案する。
 const path = require('node:path');
 const { readJsonl } = require('./util');

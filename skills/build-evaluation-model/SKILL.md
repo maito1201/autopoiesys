@@ -5,7 +5,7 @@ description: 目的に応じた独立評価システムを構築する。goal.ya
 
 # build-evaluation-model
 
-最重要コンポーネントの一つ（CONCEPT §9-10）。Agentは仕事を実行するが、**完了を認定するのはOS**。
+最重要コンポーネントの一つ（設計原則§9-10）。Agentは仕事を実行するが、**完了を認定するのはOS**。
 このSkillは `.os/evaluators/<id>.yaml` を設計・生成し、goal.yaml の evaluator 接地を進める。
 
 ## 手順

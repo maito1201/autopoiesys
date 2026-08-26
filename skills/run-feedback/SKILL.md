@@ -5,7 +5,7 @@ description: ユーザーの不満をヒアリングしてFailureとして起票
 
 # run-feedback
 
-不満はOSにとって唯一無二の学習データである（CONCEPT §12）。このSkillは
+不満はOSにとって唯一無二の学習データである（設計原則§12）。このSkillは
 ユーザーの「駄目だった」を**会話で消化して終わらせず**、必ずFailure台帳に載せる。
 根本原因の調査はしない（それは investigate-failure の仕事）。
 

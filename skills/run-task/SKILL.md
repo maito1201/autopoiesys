@@ -6,7 +6,7 @@ description: 生成されたOS上でタスクを実行する。Objective→Plan�
 # run-task
 
 Task → Code → Done ではなく、Objective → Plan → Execute → Evaluate → Next Action → …
-のループで仕事をする（CONCEPT §11）。**自分で「完了」を宣言してはならない。**
+のループで仕事をする（設計原則§11）。**自分で「完了」を宣言してはならない。**
 
 ## 手順
 

@@ -1,5 +1,5 @@
 'use strict';
-// Token Ledger・Researchセッション・知識コンパイル（CONCEPT §14）。
+// Token Ledger・Researchセッション・知識コンパイル（設計原則§14）。
 // 「推論を資産化する」の出入口: research openで開始、構造化findingsをcompileで資産化、
 // closeで産出物を検査する（資産ゼロのDeep Researchは警告）。
 const fs = require('node:fs');
@@ -78,7 +78,7 @@ function researchClose(osDir, id, assets, { budget } = {}) {
   if (list.length === 0) {
     warnings.push(
       `警告: ${id} は資産（rule/query/evaluator/golden_task）を1つも産出せずに終了した。` +
-      '高性能LLMの推論をraw reasoningのまま捨てていないか確認せよ（CONCEPT §14）'
+      '高性能LLMの推論をraw reasoningのまま捨てていないか確認せよ（設計原則§14）'
     );
   }
   const spent = readJsonl(costsFile(osDir))

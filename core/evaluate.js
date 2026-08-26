@@ -1,5 +1,5 @@
 'use strict';
-// 独立評価: Agentの「完了しました」を一切使わないコードパス（CONCEPT §9-10, §26③）。
+// 独立評価: Agentの「完了しました」を一切使わないコードパス（設計原則§9-10, §26③）。
 // deterministic / command はコアが直接実行し、llm_judge は briefing 経由で
 // 新規サブエージェントに判定させる（生成側の会話履歴は渡らない）。
 const fs = require('node:fs');
@@ -425,7 +425,7 @@ function latestDeterministicVerdicts(osDir, taskId) {
   return latest;
 }
 
-// Next Action Engine（CONCEPT §11）。決定的FAILはLLM判定で覆せない。
+// Next Action Engine（設計原則§11）。決定的FAILはLLM判定で覆せない。
 // 対象evaluatorは task.evaluators と verdict記録済みevaluatorの和集合 —
 // 評価後にevaluatorを外しても、記録済みFAILは視界から消えない。
 function nextAction(osDir, taskId) {

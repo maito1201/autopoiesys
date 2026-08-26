@@ -7,7 +7,7 @@ description: 対象領域そのものを調査し、World Modelの初期Statemen
 
 goal.yaml のドメインを調査し、World Model を構築する。
 **T3（高性能LLM/Deep Research）の使用が許可される。ただし出力形式は構造化findingsに限定
-され、自由散文をそのまま保存することは禁止**（CONCEPT §14: raw reasoningを資産化せず捨てない）。
+され、自由散文をそのまま保存することは禁止**（設計原則§14: raw reasoningを資産化せず捨てない）。
 
 ## 手順
 

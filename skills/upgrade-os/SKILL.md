@@ -5,7 +5,7 @@ description: 承認済みのOS Upgrade提案を適用し、regression（golden t
 
 # upgrade-os
 
-OS Upgradeは資産のdiffとして適用し、必ずregressionで検証する（CONCEPT §16-17）。
+OS Upgradeは資産のdiffとして適用し、必ずregressionで検証する（設計原則§16-17）。
 
 ## 前提
 

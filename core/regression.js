@@ -1,5 +1,5 @@
 'use strict';
-// OS Regression（CONCEPT §17）: golden task全件 + failure lint + 整合検査。
+// OS Regression（設計原則§17）: golden task全件 + failure lint + 整合検査。
 // llm_judgeはreplay（記録済みverdict）に置換され、回帰は決定的に走る。
 // fixture付きcheckは検出力テスト（既知の悪い状態に対して検出器が実際にFAILを出せるか）。
 const path = require('node:path');

@@ -73,7 +73,7 @@ notes: |
 `;
 
 const VOCABULARY_TEMPLATE = `# predicate / tag の登録簿。未登録は警告（strict_vocabulary: trueでエラー）。
-# 実績で安定した語彙から登録していく（最初から完璧を目指さない — CONCEPT §26⑥）。
+# 実績で安定した語彙から登録していく（最初から完璧を目指さない — 設計原則§26⑥）。
 predicates:
   - affects
   - depends_on

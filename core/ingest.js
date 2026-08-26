@@ -1,5 +1,5 @@
 'use strict';
-// 決定的なリポジトリ観測（LLMゼロ）。CONCEPT §19「通常の更新: event → deterministic update」。
+// 決定的なリポジトリ観測（LLMゼロ）。設計原則§19「通常の更新: event → deterministic update」。
 // Statement idを内容ハッシュから導出することで再実行は冪等になる。
 const fs = require('node:fs');
 const path = require('node:path');

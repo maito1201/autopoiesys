@@ -5,7 +5,7 @@ description: ユーザーの不満・FAIL verdictからFailureを調査する。
 
 # investigate-failure
 
-OSの最大の資産は失敗である（CONCEPT §12）。このSkillはFailureを**ログで終わらせず**、
+OSの最大の資産は失敗である（設計原則§12）。このSkillはFailureを**ログで終わらせず**、
 Root Cause → 検出・予防戦略 → OS Upgrade提案 に変換する。T3の使用が許可される。
 
 ## 起動条件
@@ -43,7 +43,7 @@ Root Cause → 検出・予防戦略 → OS Upgrade提案 に変換する。T3�
    - 新しいgolden task（このFailureの再発を検出する回帰テスト。可能なら既知の悪い状態を
      fixtureとして残し、検出器が実際にFAILを出せることを検証する = 検出力テスト）
    - 新しい検出系資産（evaluator / rule / query / detector）— 可能な限りT0の安価な検出器へ
-     コンパイルする（CONCEPT §13: rgパターン・テスト・lint等）
+     コンパイルする（設計原則§13: rgパターン・テスト・lint等）
 
    それに加えて、系統的な変更（Skill改訂・Workflow変更・goal.yaml改訂）が必要なら提案に含める。
 

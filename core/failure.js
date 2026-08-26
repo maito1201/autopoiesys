@@ -1,5 +1,5 @@
 'use strict';
-// Failure台帳と状態機械。「ログとして保存して終わる」(CONCEPT §26④) と
+// Failure台帳と状態機械。「ログとして保存して終わる」(設計原則§26④) と
 // 「局所修正で終わる」(§26⑦) を遷移条件で機械的に禁止する。
 const path = require('node:path');
 const { readJsonl, appendJsonl, nowIso, nextId, fingerprint } = require('./util');
