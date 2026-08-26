@@ -85,8 +85,7 @@ Claude Codeでこのディレクトリを開き、`/init-os` と打つ。
 3. **Token Economics** — 高価な推論は構造化された知識に変換して再利用し、消費は常時計測
 4. **進化** — OS自身の変更も回帰テストで守られ、安全に作り替わる
 
-詳細: 使い方は [docs/USAGE.md](docs/USAGE.md)、設計判断は [docs/DESIGN.md](docs/DESIGN.md)、
-データ形式は [SCHEMA.md](SCHEMA.md)、思想の全文は [CONCEPT.md](CONCEPT.md)。
+詳細: 使い方は [docs/USAGE.md](docs/USAGE.md)、設計判断は [docs/DESIGN.md](docs/DESIGN.md)、データ形式は [SCHEMA.md](SCHEMA.md)。
 
 ## 自分のプロジェクトで使う
 
