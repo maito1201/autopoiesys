@@ -258,6 +258,64 @@ const COMMANDS = {
     return 0;
   },
 
+  // 知識源の発見（①）。sources/excluded_sources と突き合わせ、未決定の候補が残っていれば exit 1。
+  // 「取りこぼしたのか、意図して外したのか」を人の記憶ではなく宣言で判別できる状態を保つ。
+  sources(args) {
+    const osDir = requireOsDir(args.flags);
+    const sub = args.positional[0] || 'scan';
+    if (sub !== 'scan') throw new Error('使い方: autopoiesys sources scan [--emit]');
+    const goal = schema.loadGoal(osDir);
+    let sources = schema.resolveSources(goal, osDir);
+    if (!sources.length) {
+      // sources未定義のOS（init直後）でもワークスペースは走査する。発見はgoal確定の前に必要
+      const workspace = path.dirname(path.resolve(osDir));
+      sources = [{ scope: path.basename(workspace), repo: workspace, rule_docs: [], memory_dir: null }];
+    }
+    const d = ingest.discoverKnowledgeSources({
+      sources,
+      excluded: schema.resolveExcludedSources(goal, osDir),
+    });
+    const byDecision = (v) => d.candidates.filter((c) => c.decision === v);
+    out({
+      registered: byDecision('registered').map((c) => c.path),
+      excluded: byDecision('excluded').map((c) => `${c.path}（${c.reason}）`),
+      undecided: d.undecided.map((c) => (c.kind === 'memory_dir' ? `${c.path}（${c.files}件）` : c.path)),
+      doc_clusters: d.doc_clusters.map((c) => `${c.scope}: ${c.dir} (${c.files}件)`),
+      warnings: d.warnings,
+      message: d.undecided.length
+        ? `未決定の知識源が${d.undecided.length}件ある。goal.yaml の sources に登録するか、excluded_sources に理由付きで除外を宣言せよ`
+        : '知識源はすべて登録済みか除外宣言済み',
+      hint: 'doc_clusters はファイル名から正本性を判定できない領域固有ドキュメントの在処。正本があるかを人に聞くこと',
+    }, args.flags);
+    if (args.flags.emit && d.undecided.length) process.stdout.write(`\n${ingest.emitSourcesDraft(d)}\n`);
+    return d.undecided.length ? 1 : 0;
+  },
+
+  // 到達性監査（⑤）。取り込んだ知識がQueryの返却枠に実際に入るかを決定的に検査する。
+  audit(args) {
+    const osDir = requireOsDir(args.flags);
+    const sub = args.positional[0] || 'reachability';
+    if (sub !== 'reachability') throw new Error('使い方: autopoiesys audit reachability');
+    const r = query.auditReachability(osDir);
+    out({
+      statement_count: r.statement_count,
+      query_count: r.query_count,
+      reached: r.reached,
+      unreachable: r.unreachable,
+      truncating: r.truncating.map((t) => `${t.query} ${JSON.stringify(t.params)}: 一致${t.total}件中${t.count}件`),
+      defects: r.defects,
+      message: r.violations
+        ? [
+          r.unreachable.length
+            ? `Queryから引けない事実が${r.unreachable.length}件ある（引けない事実は運用上存在しない）。Queryの絞り込み軸・limitを見直すか、Statementのタグ/scopeを直せ`
+            : '',
+          r.defects.length ? `監査できないQueryが${r.defects.length}件ある（defects参照）` : '',
+        ].filter(Boolean).join(' / ')
+        : '全Statementが少なくとも1本のQueryから到達可能',
+    }, args.flags);
+    return r.violations ? 1 : 0;
+  },
+
   query(args) {
     const osDir = requireOsDir(args.flags);
     const name = args.positional[0];
@@ -547,6 +605,7 @@ const COMMANDS = {
 検証:           validate / check / rebuild
 World Model:    assert --file s.json / statement add|supersede|show / query [name] [--param k=v]
                 ingest repo|rules|memory|knowledge|all [--scope S] [--repo D] [--check]
+知識源と到達性:  sources scan [--emit] / audit reachability
 タスクと評価:   task new [--repos <scope>[=<dir>],...] |list|show|note|artifact
                 evaluate --task T / verdict --file v.json / next-action T
 Failureループ:  feedback "..." / failure list|show|transition|lint / regression

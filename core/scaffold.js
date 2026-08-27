@@ -67,7 +67,14 @@ autonomy:
 optimization:
   - correctness
 sources:
+  # 知識の取込対象。sources scan で候補を機械的に発見できる（未登録＝取りこぼし）
   - repo: .
+    # rule_docs: [CLAUDE.md]          # 作業規約・正本ドキュメント（見出し単位でplaybook化）
+    # memory_dir: /abs/path/to/memory # 1ファイル1事実のfrontmatter付きMarkdown索引
+excluded_sources:
+  # 発見したが取り込まない知識源。reasonは必須（「取りこぼし」と「意図した除外」を区別するため）
+  # - path: ./AGENTS.md
+  #   reason: CLAUDE.mdと同内容
 notes: |
   (ヒアリング原文)
 `;

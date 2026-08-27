@@ -137,7 +137,9 @@ function execPipeline(snapshot, pipeline, params) {
 }
 
 // Query実行の唯一の入口。max_tokensで切詰め、実行をquery_log.jsonlに記録する。
-function runQuery(osDir, name, params = {}, { maxTokens, offset = 0 } = {}) {
+// snapshot / log は監査（auditReachability）用: 同一snapshotを共有し、監査の空振りで
+// query_log.jsonl を汚さないためにログを止められるようにしている。
+function runQuery(osDir, name, params = {}, { maxTokens, offset = 0, snapshot: preloaded, log = true } = {}) {
   const def = loadQueryDef(osDir, name);
   if (def.params) {
     for (const [p, spec] of Object.entries(def.params)) {
@@ -146,7 +148,7 @@ function runQuery(osDir, name, params = {}, { maxTokens, offset = 0 } = {}) {
       }
     }
   }
-  const snapshot = getSnapshot(osDir);
+  const snapshot = preloaded || getSnapshot(osDir);
   const { rows, total } = execPipeline(snapshot, def.pipeline, params);
   const budget = maxTokens || def.max_tokens || DEFAULT_MAX_TOKENS;
   const paged = rows.slice(offset);
@@ -179,16 +181,146 @@ function runQuery(osDir, name, params = {}, { maxTokens, offset = 0 } = {}) {
     results,
   };
   if (truncated) out.next_offset = offset + results.length;
-  appendJsonl(path.join(osDir, 'observations', 'query_log.jsonl'), {
-    ts: nowIso(),
-    query: name,
-    params,
-    count: results.length,
-    total,
-    truncated,
-    tokens_est: used,
-  });
+  if (log) {
+    appendJsonl(path.join(osDir, 'observations', 'query_log.jsonl'), {
+      ts: nowIso(),
+      query: name,
+      params,
+      count: results.length,
+      total,
+      truncated,
+      tokens_est: used,
+    });
+  }
   return out;
 }
 
-module.exports = { runQuery, loadQueryDef, listQueries, validateQueryDef, PIPELINE_STEPS };
+
+// ---- 到達性監査（⑤到達の機械化）----------------------------------------------------
+// 「引けない事実は運用上存在しないのと等価」である。取り込んだ知識がQueryの返却枠に実際に入るかは
+// Query設計者のセンスに委ねられており、孤児タグ（どのQueryのフィルタにも掛からない）と
+// 静かな切り捨て（一致件数 > limit / max_tokens）は誰も検出しなかった。ここで決定的に検出する。
+//
+// 必須paramの候補値は「World Modelに実在する値」から導く（where_paramが参照するフィールドの
+// 実在値）。語彙表ではなく実データから採るため、登録漏れの語彙でも監査が効く。
+function auditReachability(osDir, { maxCombos = 500, maxRunsPerQuery = 4000, maxPages = 20 } = {}) {
+  const snapshot = getSnapshot(osDir);
+  const names = listQueries(osDir);
+  const allIds = Object.keys(snapshot.statements);
+  const statements = Object.values(snapshot.statements);
+  const reached = new Set();
+  const truncating = [];
+  const defects = [];
+
+  const valuesOfField = (field) => {
+    const vals = new Set();
+    for (const st of statements) {
+      const v = st[field];
+      if (Array.isArray(v)) v.forEach((x) => vals.add(x));
+      else if (v !== undefined && v !== null && v !== '') vals.add(v);
+    }
+    return [...vals].sort();
+  };
+
+  for (const name of names) {
+    let def;
+    try {
+      def = loadQueryDef(osDir, name);
+    } catch (e) {
+      defects.push(`${name}: 定義エラーのため監査不能（${e.message.split('\n')[0]}）`);
+      continue;
+    }
+    const projected = def.pipeline.filter((st) => st.project).map((st) => st.project);
+    if (projected.length && !projected.every((fields) => fields.includes('id'))) {
+      // idを返さないQueryは引用の裏取りも到達性監査もできない（存在しない事実の引用事故の温床）
+      defects.push(`${name}: projectにidが無く、到達性を監査できない`);
+      continue;
+    }
+    // paramの候補値はWorld Modelの実在値から導く（語彙表ではなく実データなので登録漏れでも効く）
+    const fieldOfParam = {};
+    for (const step of def.pipeline) {
+      if (step.where_param) fieldOfParam[step.where_param.contains || step.where_param.equals] = step.where_param.field;
+    }
+    const params = Object.entries(def.params || {});
+    const required = params.filter(([, spec]) => spec && spec.required).map(([p]) => p);
+    const optional = params.filter(([, spec]) => !spec || !spec.required).map(([p]) => p);
+
+    // 必須paramは組み合わせ（積）を全部試す。実行先が決まらないと1件も引けないため
+    let combos = [{}];
+    let capped = false;
+    const fieldUsedBy = {};
+    for (const p of required) {
+      const field = fieldOfParam[p];
+      const values = field ? valuesOfField(field) : [];
+      if (!values.length) {
+        defects.push(`${name}: 必須param ${p} の候補値をWorld Modelから導出できない（where_paramで消費されていないか、値が存在しない）`);
+        combos = [];
+        break;
+      }
+      // 同じフィールドを2つのparamで絞るQuery（例: repo_a×repo_b）で同値の組を作らない。
+      // 「同じリポジトリを2回指定」は退化した呼び出しであり、監査の対象にすると偽の切り捨てを生む
+      const sameField = fieldUsedBy[field] || [];
+      const next = [];
+      for (const c of combos) {
+        for (const v of values) {
+          if (sameField.some((prev) => c[prev] === v)) continue;
+          next.push({ ...c, [p]: v });
+        }
+      }
+      fieldUsedBy[field] = [...sameField, p];
+      if (next.length > maxCombos) {
+        capped = true;
+        combos = next.slice(0, maxCombos);
+      } else {
+        combos = next;
+      }
+    }
+    if (capped) defects.push(`${name}: 必須paramの組み合わせが${maxCombos}件を超えるため完全監査できない`);
+
+    // 任意paramは「無し」と「1つだけ指定」を試す（積を全部試すと組み合わせ爆発する。
+    // 絞り込みを足すほど一致は狭まるので、単独指定でも到達可能性の大半は測れる）
+    const withOptionals = [];
+    for (const c of combos) {
+      withOptionals.push(c);
+      for (const p of optional) {
+        for (const v of valuesOfField(fieldOfParam[p] || p)) withOptionals.push({ ...c, [p]: v });
+      }
+    }
+    if (withOptionals.length > maxRunsPerQuery) {
+      defects.push(`${name}: 試行数が${maxRunsPerQuery}件を超えるため完全監査できない`);
+    }
+    for (const p of withOptionals.slice(0, maxRunsPerQuery)) {
+      // max_tokensによる切り詰めは next_offset で追える（呼び出し側の義務）。到達性の判定では
+      // ページングで追い切れるかを見る。追ってもなお出てこない事実は limit ステップに阻まれており、
+      // どう呼び出しても返らない＝運用上存在しない
+      let offset = 0;
+      let pages = 0;
+      let first = null;
+      for (;;) {
+        const r = runQuery(osDir, name, p, { snapshot, log: false, offset });
+        if (!first) first = r;
+        for (const row of r.results) if (row.id) reached.add(row.id);
+        pages += 1;
+        if (r.next_offset === undefined || pages >= maxPages || r.results.length === 0) break;
+        offset = r.next_offset;
+      }
+      if (first && first.total > first.count) {
+        truncating.push({ query: name, params: p, total: first.total, count: first.count });
+      }
+    }
+  }
+  const unreachable = allIds.filter((id) => !reached.has(id)).sort();
+  // 違反は「到達不能」と「監査不能」に限る。max_tokensによる切り詰めはページングで追えるので
+  // 設計（§26⑤）どおりであり、追ってもなお返らないもの（limitに阻まれた事実）だけを違反とする。
+  return {
+    statement_count: allIds.length,
+    query_count: names.length,
+    reached: reached.size,
+    unreachable,
+    truncating,
+    defects,
+    violations: unreachable.length + defects.length,
+  };
+}
+
+module.exports = { runQuery, auditReachability, loadQueryDef, listQueries, validateQueryDef, PIPELINE_STEPS };

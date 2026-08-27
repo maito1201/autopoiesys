@@ -66,6 +66,9 @@ sources:                             # 知識の取込対象。多リポジト�
     repo: /abs/path/to/repo          # 相対パスは .os/ の親ディレクトリ基準
     rule_docs: [CLAUDE.md]           # 作業規約Markdown。見出し単位でplaybook Statement化
     memory_dir: /abs/path/to/memory  # 1ファイル1事実のfrontmatter付きMarkdown索引
+excluded_sources:                    # 発見したが取り込まない知識源（reason必須）
+  - path: ./AGENTS.md
+    reason: CLAUDE.mdと同内容
 notes: |
   ヒアリング原文などの自由記述
 ```
@@ -73,6 +76,14 @@ notes: |
 制約: `success_criteria[].evaluator` と `constraints[].evaluator` は必須
 （未実装なら `unbound`）。`autopoiesys validate` が unbound を集計・警告する。
 `sources[].scope` は重複不可（別リポジトリの知識が同じ宛先に混ざる事故を防ぐ）。
+
+`sources` に登録されていない知識源は `autopoiesys sources scan` が候補として列挙する
+（探索対象: 各repoのルート直下の CLAUDE.md / AGENTS.md / CONTRIBUTING.md / .cursorrules /
+.clinerules / .github/copilot-instructions.md、ネストした CLAUDE.md / AGENTS.md、
+`~/.claude/projects/<パスから導くslug>/memory`、`~/.claude/CLAUDE.md`。
+vendor / node_modules / Pods / dist 等の他人の規約は対象外）。
+候補は `sources` へ登録するか `excluded_sources` に理由付きで宣言するまで `undecided` として
+残り、`sources scan` は exit 1 を返す — 取りこぼしと意図した除外を区別するための契約である。
 
 ## Statement（world_model/events.jsonl の1行）
 

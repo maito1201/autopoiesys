@@ -27,11 +27,19 @@ QueryはOS Builderが領域に応じて設計するものであり、固定API�
      あるとき。Statement蓄積時のタグ付けと合わせて設計する。paramのカンマ区切りは
      OR条件として解釈される（`--param tag=billing,test`）
    - 可能なら golden（期待件数など）を添えてQuery自体を回帰対象にする
+   - **作法系（禁止事項・運用ルール）は話題タグを持たない**。scopeで引ける経路を必ず1本置く
+     （話題タグ絞りだけのQuery群にすると、規約が構造的に取り落とされる）
 
-3. 動作確認:
+3. 動作確認。**Queryを足したら到達性を測る**（Query設計の良し悪しは「World Modelの全事実が
+   どれかのQueryから返ってくるか」で決まる。引けない事実は運用上存在しない）:
 
        node cli/index.js query <name> --param k=v
+       node cli/index.js audit reachability
        node cli/index.js check
+
+   `unreachable` に残ったStatementは、絞り込み軸が足りない（孤児タグ）か、limit/max_tokensの
+   枠から常に落ちている。**Queryを足すか枠を上げて0件にする**。
+   `project` に `id` を含めること（idが無いQueryは引用の裏取りも到達性監査もできない）
 
 4. 対応するproposalファイルがあれば削除する（提案の消化）。
 

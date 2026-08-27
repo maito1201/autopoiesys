@@ -15,9 +15,13 @@ goal.yaml のドメインを調査し、World Model を構築する。
 
        node cli/index.js research open --purpose "<調査目的>"
 
-2. **決定的観測（LLMゼロ）を先に実行する**:
+2. **決定的観測（LLMゼロ）を先に実行する**。T3の推論より先に、すでに体系化されて
+   外部に存在する知識を全部入れる（ここを飛ばすと、T3が既知の事実を再発見して払い直す）:
 
-       node cli/index.js ingest repo
+       node cli/index.js sources scan     # 未決定の知識源が残っていないか（残っていればinit-os手順5へ戻す）
+       node cli/index.js ingest all       # repo構成 + 作業規約(rule_docs) + 自動メモリ(memory_dir)
+
+   `ingest repo` だけでは規約ドキュメントと自動メモリが入らない。**`all` で回すこと**
 
 3. 調査対象は目的によって動的に決める。固定Schemaを押し付けない。
    例（Engineer OS）: repository / architecture / documentation / issues / PR履歴 /
@@ -55,6 +59,11 @@ goal.yaml のドメインを調査し、World Model を構築する。
 
        node cli/index.js compile --file <findings.json>
        node cli/index.js check
+
+   checkの警告「どのQueryからも引けないStatementが n 件」は、**入れた知識が使われない状態**を
+   意味する（引けない事実は運用上存在しない）。`node cli/index.js audit reachability` で対象を確認し、
+   Queryの絞り込み軸を足す（build-query-system）か、Statementのtag/scopeを直して解消する。
+   ここを残すと、資産化したつもりの知識が実行時に届かない
 
 7. セッションを閉じる。**産出した資産（candidates→実ファイル化されたもの）を申告する**:
 

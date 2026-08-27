@@ -5,7 +5,8 @@ const path = require('node:path');
 const { parseYaml } = require('./yaml');
 const { readTextFile } = require('./util');
 const { lintWorldModel } = require('./store');
-const { listQueries, loadQueryDef } = require('./query');
+const { listQueries, loadQueryDef, auditReachability } = require('./query');
+const { discoverKnowledgeSources } = require('./ingest');
 const { listEvaluators, loadEvaluatorDef, loadTasks } = require('./evaluate');
 const failure = require('./failure');
 
@@ -42,6 +43,18 @@ function resolveSources(goal, osDir) {
       rule_docs: src.rule_docs || [],
       memory_dir: src.memory_dir ? path.resolve(workspace, String(src.memory_dir)) : null,
     });
+  }
+  return out;
+}
+
+// goal.yaml の excluded_sources を解決する。「発見したが取り込まない」という判断を資産として
+// 残すための宣言で、理由が必須。これが無いと「取りこぼし」と「意図した除外」が区別できない。
+function resolveExcludedSources(goal, osDir) {
+  const workspace = path.dirname(path.resolve(osDir));
+  const out = [];
+  for (const ex of (goal && goal.excluded_sources) || []) {
+    if (!ex || !ex.path) continue;
+    out.push({ path: path.resolve(workspace, String(ex.path)), reason: ex.reason ? String(ex.reason) : '' });
   }
   return out;
 }
@@ -85,6 +98,14 @@ function validateGoal(goal) {
     const scope = src.scope || path.basename(path.resolve(String(src.repo)));
     if (seenScopes.has(scope)) errors.push(`sources: scopeが重複している: ${scope}`);
     seenScopes.add(scope);
+  }
+  for (const ex of goal.excluded_sources || []) {
+    if (!ex || !ex.path) {
+      errors.push('excluded_sources: 各項目にpath（除外する知識源のパス）が必要');
+      continue;
+    }
+    // 理由なしの除外は「判断」ではなく取りこぼしの追認になるため必須にする
+    if (!ex.reason) errors.push(`excluded_sources ${ex.path}: reason（なぜ取り込まないか）が必要`);
   }
   return { errors, unbound };
 }
@@ -193,6 +214,35 @@ function checkAll(osDir, { now } = {}) {
       }
     }
   }
+  // 知識パイプラインの監査（①知識源の発見・⑤Queryからの到達）。取りこぼしと引けない事実は
+  // 放置すると静かに「無かったこと」になるため、毎回のcheckで可視化する（詳細は sources scan /
+  // audit reachability）。checkの合否は既存の契約（errors / failure_lint）を変えない。
+  if (goal) {
+    const disc = discoverKnowledgeSources({
+      sources: resolveSources(goal, osDir),
+      excluded: resolveExcludedSources(goal, osDir),
+    });
+    if (disc.undecided.length) {
+      report.warnings.push(
+        `未決定の知識源が${disc.undecided.length}件（例: ${disc.undecided.slice(0, 3).map((c) => c.path).join(', ')}）` +
+        '— sources scan で全件確認し、sourcesへ登録するか excluded_sources に理由付きで除外を宣言せよ'
+      );
+    }
+  }
+  const reach = auditReachability(osDir);
+  if (reach.unreachable.length) {
+    report.warnings.push(
+      `どのQueryからも引けないStatementが${reach.unreachable.length}件（例: ${reach.unreachable.slice(0, 5).join(', ')}）` +
+      '— 引けない事実は運用上存在しない。audit reachability で確認せよ'
+    );
+  }
+  if (reach.truncating.length) {
+    report.warnings.push(
+      `一致件数が返却枠を超えるQueryが${reach.truncating.length}パターン` +
+      `（対象: ${[...new Set(reach.truncating.map((t) => t.query))].join(', ')}）` +
+      '— 呼び出し側がnext_offsetで追わないと最後尾が落ちる'
+    );
+  }
   const wm = lintWorldModel(osDir, { strict: !!cfg.strict_vocabulary });
   report.errors.push(...wm.errors);
   report.warnings.push(...wm.warnings);
@@ -206,6 +256,7 @@ module.exports = {
   loadConfig,
   loadGoal,
   resolveSources,
+  resolveExcludedSources,
   validateGoal,
   validateConfig,
   validateGoldenTask,

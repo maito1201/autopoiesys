@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const { makeOs, write, statement } = require('./helpers');
 const store = require('../core/store');
-const { runQuery } = require('../core/query');
+const { runQuery, auditReachability } = require('../core/query');
 const { readJsonl } = require('../core/util');
 const path = require('node:path');
 
@@ -119,4 +119,109 @@ test('必須パラメータと未知Queryはエラー', () => {
   ].join('\n'));
   assert.throws(() => runQuery(osDir, 'need_param', {}), /必須パラメータ/);
   assert.throws(() => runQuery(osDir, 'no_such_query', {}), /存在しない/);
+});
+
+// ---- 到達性監査 ----------------------------------------------------------------------
+// 検証する要件: ①どのQueryからも引けないStatementを検出する ②必須paramの候補値をWorld Modelの
+// 実在値から導き、param必須Queryも監査できる ③limitで最後尾が落ちるだけの事実も到達不能として
+// 検出する ④idをprojectしないQueryは監査不能として申告する ⑤監査はquery_logを汚さない
+
+function writeQuery(osDir, name, lines) {
+  write(osDir, `queries/${name}.yaml`, [`name: ${name}`, 'description: x', ...lines].join('\n'));
+}
+
+test('到達性監査: どのQueryからも引けないStatementを検出する', () => {
+  const { osDir } = makeOs();
+  store.assertStatements(osDir, [
+    statement('S0001', 'constraint', '引ける制約', { tags: ['billing'] }),
+    statement('S0002', 'claim', '孤児タグの主張', { tags: ['orphan-topic'] }),
+  ]);
+  writeQuery(osDir, 'only_constraints', [
+    'pipeline:',
+    '  - select: { type: constraint }',
+    '  - project: [id, body]',
+  ]);
+  const r = auditReachability(osDir);
+  assert.deepStrictEqual(r.unreachable, ['S0002']);
+  assert.strictEqual(r.violations, 1);
+});
+
+test('到達性監査: 必須paramの候補値をWorld Modelの実在値から導く', () => {
+  const { osDir } = makeOs();
+  store.assertStatements(osDir, [
+    statement('S0001', 'constraint', 'api固有の作法', { scope: ['api'] }),
+    statement('S0002', 'constraint', 'web固有の作法', { scope: ['web'] }),
+  ]);
+  writeQuery(osDir, 'playbook', [
+    'params:',
+    '  scope:',
+    '    required: true',
+    'pipeline:',
+    '  - where_param: { field: scope, contains: scope }',
+    '  - project: [id, body]',
+  ]);
+  // scope=api / scope=web の両方が試されるため、両方が到達可能になる
+  assert.deepStrictEqual(auditReachability(osDir).unreachable, []);
+});
+
+test('到達性監査: limitで最後尾が落ちる事実は到達不能として検出する', () => {
+  const { osDir } = makeOs();
+  store.assertStatements(osDir, [
+    statement('S0001', 'constraint', '1件目'),
+    statement('S0002', 'constraint', '2件目'),
+  ]);
+  writeQuery(osDir, 'capped', [
+    'pipeline:',
+    '  - select: { type: constraint }',
+    '  - sort: { by: id, order: asc }',
+    '  - project: [id, body]',
+    '  - limit: 1',
+  ]);
+  const r = auditReachability(osDir);
+  assert.deepStrictEqual(r.unreachable, ['S0002']);
+  assert.strictEqual(r.truncating.length, 1);
+  assert.strictEqual(r.truncating[0].total, 2);
+});
+
+test('到達性監査: idをprojectしないQueryは監査不能として申告する', () => {
+  const { osDir } = makeOs();
+  store.assertStatements(osDir, [statement('S0001', 'constraint', '制約')]);
+  writeQuery(osDir, 'no_id', [
+    'pipeline:',
+    '  - select: { type: constraint }',
+    '  - project: [body]',
+  ]);
+  const r = auditReachability(osDir);
+  assert.match(r.defects.join(), /projectにidが無く/);
+  assert.strictEqual(r.violations, 2); // 監査不能1件 + 到達不能1件
+});
+
+test('到達性監査: query_logを汚さない', () => {
+  const { osDir } = makeOs();
+  store.assertStatements(osDir, [statement('S0001', 'constraint', '制約')]);
+  writeQuery(osDir, 'all', ['pipeline:', '  - select: { type: constraint }', '  - project: [id, body]']);
+  auditReachability(osDir);
+  assert.deepStrictEqual(readJsonl(path.join(osDir, 'observations', 'query_log.jsonl')), []);
+});
+
+test('到達性監査: max_tokensの切り詰めはページングで追えるので到達不能にしない', () => {
+  const { osDir } = makeOs();
+  store.assertStatements(osDir, [
+    statement('S0001', 'constraint', 'あ'.repeat(400)),
+    statement('S0002', 'constraint', 'い'.repeat(400)),
+  ]);
+  writeQuery(osDir, 'tight_budget', [
+    'pipeline:',
+    '  - select: { type: constraint }',
+    '  - sort: { by: id, order: asc }',
+    '  - project: [id, body]',
+    '  - limit: 10',
+    'max_tokens: 200',
+  ]);
+  // 1ページには収まらないが next_offset で追える = 運用上は引ける
+  assert.ok(runQuery(osDir, 'tight_budget', {}).truncated);
+  const r = auditReachability(osDir);
+  assert.deepStrictEqual(r.unreachable, []);
+  assert.strictEqual(r.violations, 0);
+  assert.strictEqual(r.truncating.length, 1); // 「ページングが必要」は情報として残る
 });

@@ -11,6 +11,7 @@ const { runQuery } = require('../core/query');
 const { parseYaml } = require('../core/yaml');
 const knowledge = require('../core/knowledge');
 const { ingestRepo } = require('../core/ingest');
+const schema = require('../core/schema');
 
 test('外部verdict: deterministic評価は受理せず、provenance偽装は矯正される（§26③）', () => {
   const { root, osDir } = makeOs();
@@ -252,4 +253,32 @@ test('research close: 予算超過で警告', () => {
   const closed = knowledge.researchClose(osDir, r.id, ['rules/x.yaml'], { budget: 1000 });
   assert.strictEqual(closed.tokens_spent, 1100);
   assert.ok(closed.warning.includes('予算'));
+});
+
+test('excluded_sources: 理由なしの除外は拒否される（取りこぼしの追認を防ぐ）', () => {
+  const { osDir } = makeOs();
+  const goalLines = (excluded) => [
+    'goal: x',
+    'domain: d',
+    'objectives:',
+    '  - o1',
+    'success_criteria:',
+    '  - id: sc-001',
+    '    statement: s',
+    '    evaluator: unbound',
+    'sources:',
+    '  - repo: .',
+    'excluded_sources:',
+    ...excluded,
+  ].join('\n');
+
+  write(osDir, 'goal.yaml', goalLines(['  - path: ./AGENTS.md']));
+  assert.match(schema.validate(osDir).errors.join(), /reason（なぜ取り込まないか）が必要/);
+
+  write(osDir, 'goal.yaml', goalLines(['  - path: ./AGENTS.md', '    reason: CLAUDE.mdと同内容']));
+  assert.deepStrictEqual(schema.validate(osDir).errors, []);
+  // 除外は絶対パスに解決され、発見側と突き合わせられる
+  const ex = schema.resolveExcludedSources(schema.loadGoal(osDir), osDir);
+  assert.strictEqual(ex.length, 1);
+  assert.ok(path.isAbsolute(ex[0].path));
 });

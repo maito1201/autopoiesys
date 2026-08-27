@@ -110,6 +110,22 @@ golden tasks全件＋検出力テスト＋failure lint＋整合検査。FAILし�
 `/investigate-failure`。7日以上放置された失敗はregression自体を不合格にする仕様
 （失敗のログ死蔵を機械的に禁止している）。
 
+知識の取りこぼしと死蔵も同じ頻度で見る。**「知識の拡充を思いつけるかどうか」を
+オーナーのセンスに委ねないための2本**で、どちらも決定的（LLMゼロ）:
+
+```bash
+node cli/index.js sources scan          # 未登録の知識源（規約ファイル・自動メモリ）を発見する
+node cli/index.js audit reachability    # 取り込んだ知識がQueryから引けるかを検査する
+```
+
+- `sources scan` の `undecided` は「登録も除外もされていない知識源」。goal.yamlの`sources`に
+  足すか、`excluded_sources`に理由付きで書いて0件にする。`doc_clusters` はファイル名からは
+  正本と判定できないドキュメント群の在処で、正本があれば`rule_docs`へ足す
+- `audit reachability` の `unreachable` は「World Modelにあるのにどのクエリからも返らない事実」。
+  実行時には存在しないのと同じなので、Queryの絞り込み軸を足すか、tag/scopeを直して0件にする
+
+`check` はこの2つの結果を警告として毎回出すので、普段は気づくだけでよい。
+
 覚えていなくてもよい: 普段のコマンド（タスク登録・評価・feedback等）のついでに、
 regressionが`regression_every_days`（既定7日）を超えて未実行のときや、Failureの滞留が
 締め切りに近づいたとき、OSが「ヒント:」「警告:」として自分から知らせてくる。

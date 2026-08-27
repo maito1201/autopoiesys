@@ -3,13 +3,21 @@
 // 検証する要件: ①別リポジトリの観測が互いを打ち消さない ②作業規約・自動メモリを
 // 決定的に索引化できる ③再取込が冪等で、内容変更時だけsupersedeする
 // ④既存Statementへのscope後埋めが tags∩scopes の写しに限定される
+// ⑤存在する知識源を機械的に発見し、登録済み/除外宣言済み/未決定を区別できる
 const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 const { makeOs, write, statement } = require('./helpers');
 const store = require('../core/store');
-const { ingestRepo, ingestRuleDocs, ingestMemoryIndex } = require('../core/ingest');
+const {
+  ingestRepo,
+  ingestRuleDocs,
+  ingestMemoryIndex,
+  discoverKnowledgeSources,
+  emitSourcesDraft,
+  memorySlug,
+} = require('../core/ingest');
 const { runQuery } = require('../core/query');
 
 function repoWith(root, name, files) {
@@ -105,7 +113,10 @@ test('ingest memory: descriptionを索引化し、typeで status/type/tags を�
   assert.strictEqual(pj.type, 'claim');
   assert.strictEqual(pj.status, 'hypothesis');
   assert.strictEqual(pj.confidence, 0.5);
-  assert.ok(!pj.tags.includes('playbook')); // 進行中の結論は作法ではない
+  // metadata.type は記憶の種類であって作法かどうかではない。project型で書かれた運用ルール
+  // （「このリポジトリはmain直pushで開発する」等）がplaybook Queryから落ちる取りこぼしが実際に
+  // 起きたため、メモリ索引は全件をplaybook到達対象にする
+  assert.deepStrictEqual(pj.tags, ['playbook', 'memory', 'project']);
   // 冪等 / descriptionが変わったらsupersede
   assert.deepStrictEqual(ingestMemoryIndex(osDir, { scope: 'repo-a', dir }).added, []);
   write(dir, 'f.md', ['---', 'name: f_rule', 'description: prettier の一括整形は禁止（変更ファイルのみ整形する）', 'metadata:', '  type: feedback', '---'].join('\n'));
@@ -235,4 +246,114 @@ test('dryRun: 追記せず「追記されるはずだったもの」を返す（
   // 知識源が更新されたら再び would_add が立つ（更新漏れの検出）
   write(dir, 'f.md', ['---', 'name: f', 'description: prettier の一括整形は禁止（変更ファイルのみ整形する）', 'metadata:', '  type: feedback', '---'].join('\n'));
   assert.strictEqual(ingestMemoryIndex(osDir, { scope: 'repo-a', dir, dryRun: true }).would_add.length, 1);
+});
+
+// ---- 知識源の発見（init時の取りこぼし対策）--------------------------------------------
+// 検証する要件: ①存在する知識源を機械的に列挙できる ②登録済み/除外宣言済み/未決定を区別する
+// ③ベンダリング等の「他人の規約」を拾わない ④正本性がファイル名から判定できない領域固有
+// ドキュメントは候補ではなくdoc_clustersとして人に問う材料になる
+
+test('知識源の発見: 未登録の規約ファイルとメモリを未決定として列挙する', () => {
+  const { root } = makeOs();
+  const home = path.join(root, 'home');
+  const repo = repoWith(root, 'repo-a', {
+    'CLAUDE.md': '# 規約',
+    'AGENTS.md': '# 別のエージェント向け規約',
+    'backend/CLAUDE.md': '# ネストした規約（本人が書いたもの）',
+    'vendor/dep/CLAUDE.md': '# 依存ライブラリの規約（他人のもの）',
+    'node_modules/x/AGENTS.md': '# 他人のもの',
+    'docs/design/a.md': '設計',
+    'docs/design/b.md': '設計',
+  });
+  const memDir = path.join(home, '.claude', 'projects', memorySlug(repo), 'memory');
+  write(memDir, 'MEMORY.md', '索引');
+  write(memDir, 'a.md', '---\nname: a\ndescription: x\n---');
+
+  const d = discoverKnowledgeSources({
+    sources: [{ scope: 'repo-a', repo, rule_docs: ['CLAUDE.md'], memory_dir: null }],
+    excluded: [{ path: path.join(repo, 'AGENTS.md'), reason: 'CLAUDE.mdと同内容' }],
+    home,
+  });
+  const at = (p) => d.candidates.find((c) => c.path === p);
+  assert.strictEqual(at(path.join(repo, 'CLAUDE.md')).decision, 'registered');
+  assert.strictEqual(at(path.join(repo, 'AGENTS.md')).decision, 'excluded');
+  assert.strictEqual(at(path.join(repo, 'backend/CLAUDE.md')).decision, 'undecided');
+  // 依存ライブラリ・生成物の同名ファイルは取込対象ではない
+  assert.strictEqual(at(path.join(repo, 'vendor/dep/CLAUDE.md')), undefined);
+  assert.strictEqual(at(path.join(repo, 'node_modules/x/AGENTS.md')), undefined);
+  // パスから機械的に導いたメモリ索引（登録漏れは記憶ではなく列挙で見つける）
+  const mem = at(memDir);
+  assert.strictEqual(mem.kind, 'memory_dir');
+  assert.strictEqual(mem.files, 1); // MEMORY.md は数えない
+  assert.strictEqual(mem.decision, 'undecided');
+  // 未決定だけが「判断が必要」として上がる
+  assert.deepStrictEqual(
+    d.undecided.map((c) => c.path).sort(),
+    [path.join(repo, 'backend/CLAUDE.md'), memDir].sort()
+  );
+  // 領域固有ドキュメントは候補ではなく、人に正本を問うための材料
+  assert.ok(d.doc_clusters.some((c) => c.dir === 'docs/design' && c.files === 2));
+  assert.ok(!d.candidates.some((c) => c.path.endsWith('docs/design/a.md')));
+});
+
+test('知識源の発見: グローバル規約（~/.claude/CLAUDE.md）を候補に含める', () => {
+  const { root } = makeOs();
+  const home = path.join(root, 'home');
+  write(path.join(home, '.claude'), 'CLAUDE.md', '# 全セッションに効く規約');
+  const d = discoverKnowledgeSources({ sources: [], excluded: [], home });
+  const g = d.candidates.find((c) => c.scope === 'global-rules');
+  assert.strictEqual(g.path, path.join(home, '.claude', 'CLAUDE.md'));
+  assert.strictEqual(g.decision, 'undecided');
+  // 登録すれば決定済みになる（ingest rules の入力としてそのまま使える形）
+  const d2 = discoverKnowledgeSources({
+    sources: [{ scope: 'global-rules', repo: path.join(home, '.claude'), rule_docs: ['CLAUDE.md'], memory_dir: null }],
+    excluded: [],
+    home,
+  });
+  assert.strictEqual(d2.undecided.length, 0);
+});
+
+test('sources下書き: 未決定の候補からgoal.yamlへ貼れる断片を作る', () => {
+  const { root } = makeOs();
+  const home = path.join(root, 'home');
+  const repo = repoWith(root, 'repo-b', { 'CLAUDE.md': '# 規約' });
+  const d = discoverKnowledgeSources({ sources: [{ scope: 'repo-b', repo, rule_docs: [], memory_dir: null }], excluded: [], home });
+  const draft = emitSourcesDraft(d);
+  assert.match(draft, /scope: repo-b/);
+  assert.match(draft, /rule_docs: \[CLAUDE\.md\]/);
+});
+
+test('知識源の発見: ディレクトリとして存在する規約名は候補にしない', () => {
+  const { root } = makeOs();
+  const home = path.join(root, 'home');
+  const repo = repoWith(root, 'repo-c', { '.clinerules/overview.mdc': '規約' });
+  const d = discoverKnowledgeSources({ sources: [{ scope: 'repo-c', repo, rule_docs: [], memory_dir: null }], excluded: [], home });
+  // ingest rules が読めないパス（ディレクトリ）を採否の判断に出しても解決できない
+  assert.strictEqual(d.candidates.filter((c) => c.path.endsWith('.clinerules')).length, 0);
+});
+
+test('知識源の発見: ~/.claude はsources登録済みでもネスト探索しない（他人のプラグインを拾わない）', () => {
+  const { root } = makeOs();
+  const home = path.join(root, 'home');
+  const claudeDir = path.join(home, '.claude');
+  write(claudeDir, 'CLAUDE.md', '# 全セッションの規約');
+  write(claudeDir, 'plugins/cache/vendor-plugin/AGENTS.md', '# 他人のプラグインの規約');
+  const d = discoverKnowledgeSources({
+    sources: [{ scope: 'global-rules', repo: claudeDir, rule_docs: ['CLAUDE.md'], memory_dir: null }],
+    excluded: [],
+    home,
+  });
+  assert.deepStrictEqual(d.undecided, []);
+  assert.ok(!d.candidates.some((c) => c.path.includes('plugins')));
+});
+
+test('知識源の発見: 表示を絞った事実を警告として申告する（黙った打ち切りをしない）', () => {
+  const { root } = makeOs();
+  const home = path.join(root, 'home');
+  const files = {};
+  for (let i = 0; i < 8; i += 1) files[`docs/d${i}/x.md`] = 'doc';
+  const repo = repoWith(root, 'repo-d', files);
+  const d = discoverKnowledgeSources({ sources: [{ scope: 'repo-d', repo, rule_docs: [], memory_dir: null }], excluded: [], home });
+  assert.strictEqual(d.doc_clusters.length, 5); // 上限
+  assert.match(d.warnings.join(), /8件のうち上位5件のみ表示/);
 });
