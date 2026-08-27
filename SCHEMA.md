@@ -88,6 +88,7 @@ notes: |
 - `subject/predicate/object`: relationship用（任意）。predicateはvocabulary登録制（既定は警告）
 - `confidence`: 0..1（任意）
 - `provenance.method`: deterministic | llm | human
+- `provenance.task`: 任意。run-task中の還流（`statement add|supersede`）で出所タスクを記録する
 - 必須: id, ts, type, body, status, provenance
 
 ## Query定義（queries/*.yaml）

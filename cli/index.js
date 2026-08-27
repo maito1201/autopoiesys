@@ -149,6 +149,43 @@ const COMMANDS = {
     return 0;
   },
 
+  // タスク中の学習還流。add: 新しい事実・制約を1件追記 / supersede: 既存Statementを訂正して置換 / show: 1件表示
+  statement(args) {
+    const osDir = requireOsDir(args.flags);
+    const sub = args.positional[0];
+    const usage = '使い方: autopoiesys statement add "<body>" --type t --source s [--tags a,b] [--status fact|hypothesis|unknown] [--confidence 0.x] [--method llm|human|deterministic] [--task T001]\n' +
+      '        autopoiesys statement supersede <S00xx> "<訂正後body>" --source s [--type/--tags/--status は省略時に旧Statementから継承]\n' +
+      '        autopoiesys statement show <S00xx>';
+    if (sub === 'show') {
+      const id = args.positional[1];
+      if (!id) throw new Error(usage);
+      const snap = store.getSnapshot(osDir);
+      const st = snap.statements[id];
+      if (!st) throw new Error(`Statementが現在状態に存在しない: ${id}`);
+      out(st, args.flags);
+      return 0;
+    }
+    if (sub !== 'add' && sub !== 'supersede') throw new Error(usage);
+    const supersedes = sub === 'supersede' ? args.positional[1] : undefined;
+    const body = args.positional.slice(sub === 'supersede' ? 2 : 1).join(' ');
+    if (!body || (sub === 'supersede' && !supersedes)) throw new Error(usage);
+    if (!args.flags.source) throw new Error('--source が必要（何で裏取りしたか: ファイルパス、"本人指示 2026-08-27" 等）');
+    const r = store.recordStatement(osDir, {
+      body,
+      supersedes,
+      type: args.flags.type ? String(args.flags.type) : undefined,
+      status: args.flags.status ? String(args.flags.status) : undefined,
+      tags: args.flags.tags ? String(args.flags.tags).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
+      confidence: args.flags.confidence !== undefined ? Number(args.flags.confidence) : undefined,
+      predicate: args.flags.predicate ? String(args.flags.predicate) : undefined,
+      source: String(args.flags.source),
+      method: args.flags.method ? String(args.flags.method) : undefined,
+      task: args.flags.task ? String(args.flags.task) : undefined,
+    });
+    out(r, args.flags);
+    return 0;
+  },
+
   ingest(args) {
     const osDir = requireOsDir(args.flags);
     const what = args.positional[0] || 'repo';
@@ -395,7 +432,7 @@ const COMMANDS = {
 
 環境・初期化:   doctor / init [--dir D] [--force] / version / migrate
 検証:           validate / check / rebuild
-World Model:    assert --file s.json / ingest repo [--repo D] / query [name] [--param k=v]
+World Model:    assert --file s.json / statement add|supersede|show / ingest repo [--repo D] / query [name] [--param k=v]
 タスクと評価:   task new|list|show|artifact / evaluate --task T / verdict --file v.json / next-action T
 Failureループ:  feedback "..." / failure list|show|transition|lint / regression
 Token Economics: ledger add / research open|close|list / compile --file f.json / metrics

@@ -78,3 +78,58 @@ test('未登録predicateは警告（strictでエラー）', () => {
     /未登録のpredicate/
   );
 });
+
+test('recordStatement: add はデフォルト補完と provenance.task を記録する', () => {
+  const { osDir } = makeOs();
+  const r = store.recordStatement(osDir, {
+    body: '仮予約は30分で失効する',
+    type: 'constraint',
+    tags: ['booking'],
+    source: 'app/domain/model/booking.go:34',
+    task: 'T001',
+  });
+  assert.strictEqual(r.added.length, 1);
+  const st = store.loadEvents(osDir).find((e) => e.id === r.added[0]);
+  assert.strictEqual(st.status, 'fact');
+  assert.strictEqual(st.provenance.method, 'llm');
+  assert.strictEqual(st.provenance.task, 'T001');
+  assert.deepStrictEqual(st.tags, ['booking']);
+});
+
+test('recordStatement: supersede は旧Statementから type/tags を継承し snapshot が畳み込む', () => {
+  const { osDir } = makeOs();
+  store.assertStatements(osDir, [
+    statement('S0001', 'constraint', '仮予約は10分で失効する', { tags: ['booking'] }),
+  ]);
+  const r = store.recordStatement(osDir, {
+    body: '仮予約は30分で失効する',
+    supersedes: 'S0001',
+    source: 'app/domain/model/booking.go:34',
+  });
+  const snap = store.getSnapshot(osDir);
+  assert.strictEqual(snap.statements.S0001, undefined);
+  const st = snap.statements[r.added[0]];
+  assert.strictEqual(st.type, 'constraint');
+  assert.deepStrictEqual(st.tags, ['booking']);
+  assert.strictEqual(st.supersedes, 'S0001');
+});
+
+test('recordStatement: 検証（type欠落 / hypothesisにconfidence必須 / supersede先不在）', () => {
+  const { osDir } = makeOs();
+  assert.throws(() => store.recordStatement(osDir, { body: 'x', source: 's' }), /--typeが必要/);
+  assert.throws(
+    () => store.recordStatement(osDir, { body: 'x', type: 'claim', status: 'hypothesis', source: 's' }),
+    /confidence/
+  );
+  assert.throws(
+    () => store.recordStatement(osDir, { body: 'x', supersedes: 'S9999', source: 's' }),
+    /supersedes先が現在状態に存在しない/
+  );
+  // 置換済みStatementへの再supersedeも拒否される（現在状態に無い）
+  store.assertStatements(osDir, [statement('S0001', 'claim', '旧')]);
+  store.recordStatement(osDir, { body: '新', supersedes: 'S0001', source: 's' });
+  assert.throws(
+    () => store.recordStatement(osDir, { body: '再訂正', supersedes: 'S0001', source: 's' }),
+    /supersedes先が現在状態に存在しない/
+  );
+});

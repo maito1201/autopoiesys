@@ -132,6 +132,42 @@ function assertStatements(osDir, statements, { strict = false } = {}) {
   return { added: toAdd.map((s) => s.id), skipped, warnings: allWarnings };
 }
 
+// タスク実行中の学習をその場で1件還流する（run-taskの statement add / supersede が呼ぶ）。
+// 学習はタスク終了時・失敗時に限らない: コードで裏取りした事実、仕様と実装の矛盾、
+// ユーザーから受けた運用ルールは、発見した時点でWorld Modelに追記する。
+// supersedes指定時は現在状態の旧Statementから type/status/tags/predicate を未指定分だけ継承する。
+function recordStatement(osDir, fields) {
+  if (!fields.body) throw new Error('bodyが必要');
+  let base = {};
+  if (fields.supersedes) {
+    const snap = getSnapshot(osDir);
+    const old = snap.statements[fields.supersedes];
+    if (!old) throw new Error(`supersedes先が現在状態に存在しない（既に置換済みか、id誤り）: ${fields.supersedes}`);
+    base = { type: old.type, status: old.status, tags: old.tags, predicate: old.predicate };
+  }
+  const type = fields.type || base.type;
+  if (!type) throw new Error('--typeが必要（supersede時は旧Statementから継承される）');
+  const status = fields.status || base.status || 'fact';
+  if (status === 'hypothesis' && fields.confidence === undefined) {
+    throw new Error('status=hypothesis には --confidence（0..1）が必要');
+  }
+  const provenance = { source: fields.source, method: fields.method || 'llm' };
+  if (fields.task) provenance.task = fields.task;
+  const st = {
+    type,
+    body: fields.body,
+    status,
+    tags: fields.tags !== undefined ? fields.tags : base.tags,
+    predicate: fields.predicate || base.predicate,
+    confidence: fields.confidence,
+    links: fields.links,
+    supersedes: fields.supersedes,
+    provenance,
+  };
+  for (const k of Object.keys(st)) if (st[k] === undefined) delete st[k];
+  return assertStatements(osDir, [st]);
+}
+
 // supersedes/retractedを畳み込んだ現在状態と索引を決定的に構築する
 function buildSnapshot(events) {
   const byId = {};
@@ -219,6 +255,7 @@ module.exports = {
   loadVocabulary,
   validateStatement,
   assertStatements,
+  recordStatement,
   buildSnapshot,
   rebuildSnapshot,
   getSnapshot,
