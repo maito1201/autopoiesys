@@ -27,9 +27,9 @@ function loadEvents(osDir) {
 
 function loadVocabulary(osDir) {
   const file = path.join(osDir, 'world_model', 'vocabulary.yaml');
-  if (!fs.existsSync(file)) return { predicates: [], tags: [] };
+  if (!fs.existsSync(file)) return { predicates: [], tags: [], scopes: [] };
   const v = parseYaml(readTextFile(file)) || {};
-  return { predicates: v.predicates || [], tags: v.tags || [] };
+  return { predicates: v.predicates || [], tags: v.tags || [], scopes: v.scopes || [] };
 }
 
 // 既存イベントで使用実績のあるtag/predicate（登録簿とは別の「既成事実」の語彙）。
@@ -38,11 +38,13 @@ function loadVocabulary(osDir) {
 function usedVocabulary(events) {
   const tags = new Set();
   const predicates = new Set();
+  const scopes = new Set();
   for (const e of events) {
     for (const t of e.tags || []) tags.add(t);
+    for (const sc of e.scope || []) scopes.add(sc);
     if (e.predicate) predicates.add(e.predicate);
   }
-  return { tags, predicates };
+  return { tags, predicates, scopes };
 }
 
 // 1件のStatementを検証する。knownIds には既存+同一バッチのIDを渡す。
@@ -86,6 +88,21 @@ function validateStatement(st, { knownIds, vocab, used, strict }) {
   }
   if (st.tags !== undefined && (!Array.isArray(st.tags) || st.tags.some((t) => typeof t !== 'string'))) {
     errors.push(`${label}: tagsは文字列の配列`);
+  }
+  // scope: このStatementが適用される対象（リポジトリ等）の配列。省略は「対象に依らない知識」を意味し、
+  // scope絞りのQueryには乗らない（tagsは話題、scopeは宛先という分離）。
+  if (st.scope !== undefined && (!Array.isArray(st.scope) || st.scope.some((v) => typeof v !== 'string'))) {
+    errors.push(`${label}: scopeは文字列の配列`);
+  }
+  if (Array.isArray(st.scope) && vocab) {
+    for (const sc of st.scope) {
+      if (vocab.scopes.includes(sc)) continue;
+      if (strict) {
+        errors.push(`${label}: 未登録のscope: ${sc}（strict_vocabulary有効。vocabulary.yamlのscopesに登録が必要）`);
+      } else if (!used || !used.scopes.has(sc)) {
+        warnings.push(`${label}: 初出のscope: ${sc}（typoでなければそのまま使える。安定したら world_model/vocabulary.yaml のscopesに登録）`);
+      }
+    }
   }
   if (st.predicate && vocab && !vocab.predicates.includes(st.predicate)) {
     if (strict) {
@@ -141,6 +158,7 @@ function assertStatements(osDir, statements, { strict = false } = {}) {
     allWarnings.push(...warnings);
     // 同一バッチ内の再利用は警告しない（初出の1回だけ）
     for (const t of st.tags || []) used.tags.add(t);
+    for (const sc of st.scope || []) used.scopes.add(sc);
     if (st.predicate) used.predicates.add(st.predicate);
     toAdd.push(st);
   }
@@ -164,7 +182,7 @@ function recordStatement(osDir, fields) {
     const snap = getSnapshot(osDir);
     const old = snap.statements[fields.supersedes];
     if (!old) throw new Error(`supersedes先が現在状態に存在しない（既に置換済みか、id誤り）: ${fields.supersedes}`);
-    base = { type: old.type, status: old.status, tags: old.tags, predicate: old.predicate };
+    base = { type: old.type, status: old.status, tags: old.tags, scope: old.scope, predicate: old.predicate };
   }
   const type = fields.type || base.type;
   if (!type) throw new Error('--typeが必要（supersede時は旧Statementから継承される）');
@@ -179,6 +197,7 @@ function recordStatement(osDir, fields) {
     body: fields.body,
     status,
     tags: fields.tags !== undefined ? fields.tags : base.tags,
+    scope: fields.scope !== undefined ? fields.scope : base.scope,
     predicate: fields.predicate || base.predicate,
     confidence: fields.confidence,
     links: fields.links,
@@ -200,6 +219,7 @@ function buildSnapshot(events) {
   const current = {};
   const byType = {};
   const byTag = {};
+  const byScope = {};
   const linksIn = {};
   for (const st of events) {
     if (superseded.has(st.id)) continue;
@@ -210,6 +230,7 @@ function buildSnapshot(events) {
     const st = current[id];
     (byType[st.type] = byType[st.type] || []).push(id);
     for (const t of st.tags || []) (byTag[t] = byTag[t] || []).push(id);
+    for (const sc of st.scope || []) (byScope[sc] = byScope[sc] || []).push(id);
     for (const l of st.links || []) {
       (linksIn[l.to] = linksIn[l.to] || []).push({ from: id, role: l.role });
     }
@@ -217,7 +238,7 @@ function buildSnapshot(events) {
   return {
     meta: { event_count: events.length },
     statements: current,
-    indexes: { by_type: byType, by_tag: byTag, links_in: linksIn },
+    indexes: { by_type: byType, by_tag: byTag, by_scope: byScope, links_in: linksIn },
   };
 }
 
@@ -244,6 +265,55 @@ function getSnapshot(osDir) {
     }
   }
   return rebuildSnapshot(osDir);
+}
+
+// scopeの後埋め（migration）。多リポジトリ横断のためにscopeを導入した時点で、既存Statementは
+// 宛先を持たない。tagsに現れているscope名（vocabulary.yamlのscopesが正本）を宛先として写す。
+// 写せないものはscopeなし＝「対象リポジトリに依らない知識」として残す（過剰包含側に倒す:
+// scopeを誤って付けるとscope絞りのQueryから知識が消えるが、付けないだけなら話題tagで引ける）。
+// ingest-repo観測はtagsに宛先を持たないため、fallbackScopeを明示で指定した時だけ写す。
+function backfillScope(osDir, { scopes, fallbackScope, fallbackSource = 'ingest-repo', apply = false } = {}) {
+  const known = new Set(scopes || []);
+  if (!known.size) throw new Error('backfillScope: scopes（宛先名の登録簿）が空。vocabulary.yamlのscopesを先に定義せよ');
+  const events = loadEvents(osDir);
+  const byScope = {};
+  const changed = [];
+  let alreadyScoped = 0;
+  let leftCommon = 0;
+  const next = events.map((st) => {
+    if (Array.isArray(st.scope) && st.scope.length) {
+      alreadyScoped++;
+      return st;
+    }
+    let derived = (st.tags || []).filter((t) => known.has(t));
+    if (!derived.length && fallbackScope && st.provenance && st.provenance.source === fallbackSource) {
+      derived = [fallbackScope];
+    }
+    if (!derived.length) {
+      leftCommon++;
+      return st;
+    }
+    for (const sc of derived) byScope[sc] = (byScope[sc] || 0) + 1;
+    changed.push({ id: st.id, scope: derived });
+    return { ...st, scope: derived };
+  });
+  const report = {
+    events: events.length,
+    scoped: changed.length,
+    already_scoped: alreadyScoped,
+    left_without_scope: leftCommon,
+    by_scope: byScope,
+    applied: false,
+  };
+  if (!apply) return report;
+  const file = eventsFile(osDir);
+  // 破壊的な書き換えなので、適用前の原本を隣に残す（git履歴と二重の保険）
+  if (fs.existsSync(file)) atomicWriteFile(`${file}.pre-scope-backfill`, fs.readFileSync(file, 'utf8'));
+  atomicWriteFile(file, next.map((st) => stableStringify(st)).join('\n') + (next.length ? '\n' : ''));
+  rebuildSnapshot(osDir);
+  report.applied = true;
+  report.backup = `${file}.pre-scope-backfill`;
+  return report;
 }
 
 // リンク整合・語彙のlint（`autopoiesys check` 用）。
@@ -280,6 +350,17 @@ function lintWorldModel(osDir, { strict = false } = {}) {
         '（安定した語彙は world_model/vocabulary.yaml への登録を検討）'
       );
     }
+    // scopeは対象リポジトリ等の閉じた集合であり、未登録は語彙の揺れ（typo・命名不一致）の兆候。
+    // tagsより強く可視化する（全件列挙する）。
+    const scopeCounts = {};
+    for (const st of events) for (const sc of st.scope || []) if (!vocab.scopes.includes(sc)) scopeCounts[sc] = (scopeCounts[sc] || 0) + 1;
+    const unregScopes = Object.entries(scopeCounts).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+    if (unregScopes.length) {
+      warnings.push(
+        `使用中だが未登録のscope: ${unregScopes.map(([sc, n]) => `${sc}(${n})`).join(', ')}` +
+        '（scopeは閉じた集合。world_model/vocabulary.yaml のscopesに登録するか、命名の揺れを修正せよ）'
+      );
+    }
   }
   return { errors, warnings, count: events.length };
 }
@@ -297,5 +378,6 @@ module.exports = {
   buildSnapshot,
   rebuildSnapshot,
   getSnapshot,
+  backfillScope,
   lintWorldModel,
 };

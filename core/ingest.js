@@ -4,7 +4,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { sha1, nowIso } = require('./util');
+const { sha1, nowIso, readTextFile } = require('./util');
+const { parseYaml } = require('./yaml');
 const { assertStatements, loadEvents } = require('./store');
 
 const SKIP_DIRS = new Set(['.git', '.os', 'node_modules', '.claude', 'dist', 'build', '__pycache__']);
@@ -39,9 +40,10 @@ function git(repoRoot, args) {
   return (res.stdout || '').trim();
 }
 
-function obsStatement(kind, body, ts) {
-  return {
-    id: `obs-${sha1(`${kind}\n${body}`).slice(0, 10)}`,
+function obsStatement(kind, body, ts, scope) {
+  const key = scope ? `${scope}\n${kind}` : kind;
+  const st = {
+    id: `obs-${sha1(`${key}\n${body}`).slice(0, 10)}`,
     ts,
     type: 'observation',
     body,
@@ -49,35 +51,197 @@ function obsStatement(kind, body, ts) {
     tags: ['repo', kind],
     provenance: { source: 'ingest-repo', method: 'deterministic' },
   };
+  if (scope) st.scope = [scope];
+  return st;
+}
+
+// 「同じ観測対象の世代」を (scope, series) で引く索引。scopeを混ぜないことが多リポジトリ横断の
+// 前提である: 別リポジトリの同種観測を互いに打ち消してはならない（scope未設定の旧世代は '' キー）。
+// match(e) が真の現在Statementだけを対象にし、seriesOf(e) がその系列キーを返す。
+function latestBySeries(events, match, seriesOf) {
+  const superseded = new Set(events.filter((e) => e.supersedes).map((e) => e.supersedes));
+  const latest = {};
+  for (const e of events) {
+    if (superseded.has(e.id)) continue;
+    if (!match(e)) continue;
+    const series = seriesOf(e);
+    if (series) latest[`${(e.scope || []).join(',')}|${series}`] = e.id;
+  }
+  return latest;
+}
+
+// 内容ハッシュ由来のidで冪等・内容変化時は旧世代をsupersedeという共通規律を1箇所に集約する。
+function makeSuperseder(events, latest, scope) {
+  const known = new Set(events.map((e) => e.id));
+  const scopeKey = scope || '';
+  return (st, series) => {
+    const prev = latest[`${scopeKey}|${series}`];
+    if (!prev) return st; // 初回
+    if (prev === st.id) return null; // 内容不変 → 追記不要
+    if (known.has(st.id)) {
+      // 過去と同一内容への回帰でidが衝突する場合は世代を混ぜて別idにする
+      const [prefix] = st.id.split('-');
+      st.id = `${prefix}-${sha1(`${series}\n${st.body}\n${prev}`).slice(0, 10)}`;
+    }
+    st.supersedes = prev;
+    return st;
+  };
+}
+
+// 1行に畳んで空白を正規化する（Statement bodyは1件1主張の短文が原則）
+function flatten(text) {
+  return text.replace(/\s*\n\s*/g, ' ').replace(/[ \t]{2,}/g, ' ').trim();
+}
+
+// 見出し（# 〜 ####）で本文を分割する。sectionは「見出し行 + 次の見出しまでの本文」。
+function splitByHeading(text) {
+  const lines = text.split('\n');
+  const heads = [];
+  lines.forEach((l, i) => {
+    const m = /^(#{1,4})\s+(.+?)\s*$/.exec(l);
+    if (m) heads.push({ i, level: m[1].length, title: m[2] });
+  });
+  const sections = [];
+  for (let k = 0; k < heads.length; k++) {
+    const end = k + 1 < heads.length ? heads[k + 1].i : lines.length;
+    const content = lines.slice(heads[k].i + 1, end).join('\n');
+    sections.push({ title: heads[k].title, level: heads[k].level, content });
+  }
+  return sections;
+}
+
+// frontmatter（--- で囲まれたYAML）と本文を分離する
+function splitFrontmatter(text) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
+  if (!m) return { front: null, body: text };
+  return { front: parseYaml(m[1]) || {}, body: text.slice(m[0].length) };
+}
+
+// リポジトリの作業規約ドキュメント（CLAUDE.md / AGENTS.md 等）を見出し単位のplaybook
+// Statementとして取り込む。LLMを使わない決定的変換（設計原則§19）。
+// 長い節は先頭を要約枠として保持し、全文はファイルパスへのポインタで残す
+// （World Modelに本文を丸ごと抱えるとQueryの返却枠を食い潰すため — R002 H2）。
+function ingestRuleDocs(osDir, { scope, repoRoot, docs, maxSectionChars = 1200, dryRun = false } = {}) {
+  if (!scope) throw new Error('ingestRuleDocsにはscopeが必要（どのリポジトリの規約か）');
+  const root = path.resolve(repoRoot || process.cwd());
+  const ts = nowIso();
+  const events = loadEvents(osDir);
+  const isRule = (e) => e.provenance && e.provenance.source === 'ingest-rules';
+  const latest = latestBySeries(events, isRule, (e) => e.provenance.series);
+  const supersede = makeSuperseder(events, latest, scope);
+  const statements = [];
+  const missing = [];
+  for (const rel of docs || []) {
+    const abs = path.join(root, rel);
+    if (!fs.existsSync(abs)) {
+      missing.push(rel);
+      continue;
+    }
+    const sections = splitByHeading(readTextFile(abs));
+    const seenTitles = {};
+    for (const sec of sections) {
+      const content = flatten(sec.content);
+      if (!content) continue; // 見出しだけの節（章タイトル等）は主張を持たない
+      seenTitles[sec.title] = (seenTitles[sec.title] || 0) + 1;
+      const dup = seenTitles[sec.title] > 1 ? `#${seenTitles[sec.title]}` : '';
+      const series = `rule|${rel}|${sec.title}${dup}`;
+      const truncated = content.length > maxSectionChars;
+      const shown = truncated ? `${content.slice(0, maxSectionChars)}…` : content;
+      const body = `${rel}「${sec.title}」: ${shown}${truncated ? `（全文: ${abs} の「${sec.title}」節）` : ''}`;
+      const st = {
+        id: `rule-${sha1(`${scope}\n${series}\n${body}`).slice(0, 10)}`,
+        ts,
+        type: 'constraint',
+        body,
+        status: 'fact',
+        tags: ['playbook', 'agent-rule'],
+        scope: [scope],
+        provenance: { source: 'ingest-rules', method: 'deterministic', ref: `${abs}#${sec.title}`, series },
+      };
+      const withSup = supersede(st, series);
+      if (withSup) statements.push(withSup);
+    }
+  }
+  const result = commitOrPreview(osDir, statements, dryRun);
+  return { ...result, missing_docs: missing };
+}
+
+// Claude Codeの自動メモリ（1ファイル1事実・frontmatter付きMarkdown）の索引を取り込む。
+// bodyには frontmatter の description（既に1行に蒸留された主張）だけを入れ、本文は
+// ファイルパスのポインタとして残す。83件7万トークンを丸ごと入れるとQueryの返却枠を
+// 食い潰すため（R002 H2）、索引だけを資産化して本文は必要時に読む。
+const MEMORY_TYPE_MAP = {
+  feedback: { type: 'constraint', status: 'fact', playbook: true },
+  project: { type: 'claim', status: 'hypothesis', confidence: 0.5 },
+  reference: { type: 'entity', status: 'fact' },
+  user: { type: 'claim', status: 'fact' },
+};
+
+function ingestMemoryIndex(osDir, { scope, dir, dryRun = false } = {}) {
+  if (!scope) throw new Error('ingestMemoryIndexにはscopeが必要（どのリポジトリのメモリか）');
+  const base = path.resolve(dir);
+  if (!fs.existsSync(base)) return { added: [], skipped: [], warnings: [], missing_dir: base };
+  const ts = nowIso();
+  const events = loadEvents(osDir);
+  const isMem = (e) => e.provenance && e.provenance.source === 'ingest-memory';
+  const latest = latestBySeries(events, isMem, (e) => e.provenance.series);
+  const supersede = makeSuperseder(events, latest, scope);
+  const statements = [];
+  const skippedFiles = [];
+  const files = fs.readdirSync(base).filter((f) => f.endsWith('.md') && f !== 'MEMORY.md').sort();
+  for (const f of files) {
+    const abs = path.join(base, f);
+    const { front } = splitFrontmatter(readTextFile(abs));
+    const desc = front && front.description ? flatten(String(front.description)) : '';
+    if (!desc) {
+      // descriptionの無いメモリは1行の主張に蒸留されていない。機械取込の対象外として申告する
+      skippedFiles.push(f);
+      continue;
+    }
+    const memType = (front.metadata && front.metadata.type) || 'project';
+    const map = MEMORY_TYPE_MAP[memType] || MEMORY_TYPE_MAP.project;
+    const name = front.name || path.basename(f, '.md');
+    const series = `memory|${name}`;
+    const body = `${desc}（詳細: ${abs}）`;
+    const st = {
+      id: `mem-${sha1(`${scope}\n${series}\n${body}`).slice(0, 10)}`,
+      ts,
+      type: map.type,
+      body,
+      status: map.status,
+      tags: map.playbook ? ['playbook', 'memory', memType] : ['memory', memType],
+      scope: [scope],
+      provenance: { source: 'ingest-memory', method: 'deterministic', ref: abs, series },
+    };
+    if (map.confidence !== undefined) st.confidence = map.confidence;
+    const withSup = supersede(st, series);
+    if (withSup) statements.push(withSup);
+  }
+  const result = commitOrPreview(osDir, statements, dryRun);
+  return { ...result, files_seen: files.length, skipped_files: skippedFiles };
+}
+
+// dryRun時は追記せず「追記されるはずだったもの」だけを返す。取込漏れ・更新漏れの検査
+// （evaluator repo_knowledge_sync）が、World Modelを変更せずに同期状態を判定できるようにする。
+function commitOrPreview(osDir, statements, dryRun) {
+  if (!dryRun) return assertStatements(osDir, statements);
+  return { added: [], skipped: [], warnings: [], dry_run: true, would_add: statements.map((st) => st.id) };
 }
 
 // リポジトリの現状を少数のObservation Statementとして追記する（ファイル毎ではなく要約粒度）。
 // 同じ観測kindの内容が変わった場合は旧観測をsupersedesし、矛盾するfactが現在状態に併存しないようにする。
-function ingestRepo(osDir, repoRoot) {
+function ingestRepo(osDir, repoRoot, { scope, dryRun = false } = {}) {
   const root = path.resolve(repoRoot || process.cwd());
   const ts = nowIso();
   const statements = [];
-  // kindごとの最新の既存観測（supersedes済みを除く）
   const events = loadEvents(osDir);
-  const superseded = new Set(events.filter((e) => e.supersedes).map((e) => e.supersedes));
-  const latestByKind = {};
-  for (const e of events) {
-    if (e.type !== 'observation' || superseded.has(e.id)) continue;
-    if (!e.provenance || e.provenance.source !== 'ingest-repo') continue;
-    const kind = (e.tags || []).find((t) => t !== 'repo');
-    if (kind) latestByKind[kind] = e.id;
-  }
-  const withSupersede = (st, kind) => {
-    const latest = latestByKind[kind];
-    if (!latest) return st; // 初回観測
-    if (latest === st.id) return null; // 内容不変 → 追記不要
-    // 内容が変化: 旧観測をsupersede。過去と同一内容への回帰でIDが衝突する場合は世代を混ぜる
-    if (events.some((e) => e.id === st.id)) {
-      st.id = `obs-${sha1(`${kind}\n${st.body}\n${latest}`).slice(0, 10)}`;
-    }
-    st.supersedes = latest;
-    return st;
-  };
+  const latest = latestBySeries(
+    events,
+    (e) => e.type === 'observation' && e.provenance && e.provenance.source === 'ingest-repo',
+    (e) => (e.tags || []).find((t) => t !== 'repo')
+  );
+  const supersede = makeSuperseder(events, latest, scope);
+  const withSupersede = (st, kind) => supersede(st, kind);
   const pushObs = (st) => {
     if (st) statements.push(st);
   };
@@ -91,27 +255,27 @@ function ingestRepo(osDir, repoRoot) {
   const extSummary = Object.entries(byExt).sort((a, b) => b[1] - a[1]).slice(0, 15)
     .map(([e, n]) => `${e}:${n}`).join(', ');
   pushObs(withSupersede(obsStatement('inventory',
-    `ファイル構成: 総数${files.length}。拡張子別: ${extSummary}`, ts), 'inventory'));
+    `ファイル構成: 総数${files.length}。拡張子別: ${extSummary}`, ts, scope), 'inventory'));
 
   const topLevel = [...new Set(files.map((f) => f.split('/')[0]))].sort().join(', ');
-  pushObs(withSupersede(obsStatement('layout', `トップレベル構成: ${topLevel}`, ts), 'layout'));
+  pushObs(withSupersede(obsStatement('layout', `トップレベル構成: ${topLevel}`, ts, scope), 'layout'));
 
   const log = git(root, ['log', '-n', '20', '--pretty=format:%h %cs %s']);
   if (log) {
-    pushObs(withSupersede(obsStatement('git-log', `直近コミット:\n${log}`, ts), 'git-log'));
+    pushObs(withSupersede(obsStatement('git-log', `直近コミット:\n${log}`, ts, scope), 'git-log'));
   }
   const status = git(root, ['status', '--porcelain']);
   if (status !== null) {
     const lines = status ? status.split('\n').length : 0;
-    pushObs(withSupersede(obsStatement('git-status', `未コミット変更: ${lines}件`, ts), 'git-status'));
+    pushObs(withSupersede(obsStatement('git-status', `未コミット変更: ${lines}件`, ts, scope), 'git-status'));
   }
   const branch = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
   if (branch) {
-    pushObs(withSupersede(obsStatement('git-branch', `現在ブランチ: ${branch}`, ts), 'git-branch'));
+    pushObs(withSupersede(obsStatement('git-branch', `現在ブランチ: ${branch}`, ts, scope), 'git-branch'));
   }
 
-  const result = assertStatements(osDir, statements);
+  const result = commitOrPreview(osDir, statements, dryRun);
   return { ...result, file_count: files.length };
 }
 
-module.exports = { ingestRepo };
+module.exports = { ingestRepo, ingestRuleDocs, ingestMemoryIndex };

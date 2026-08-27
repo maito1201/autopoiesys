@@ -5,14 +5,14 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { readJsonl, appendJsonl, nowIso, nextId, atomicWriteFile, readTextFile } = require('./util');
+const { readJsonl, appendJsonl, nowIso, nextId, atomicWriteFile, readTextFile, stableStringify } = require('./util');
 const { parseYaml } = require('./yaml');
 const { runQuery } = require('./query');
 
 const VERDICTS = ['PASS', 'FAIL', 'UNCERTAIN'];
 const REASONS = ['insufficient_evidence', 'model_limitation', 'conflicting_evidence'];
 const METHODS = ['deterministic', 'command', 'llm_judge'];
-const CHECK_KINDS = ['file_exists', 'file_absent', 'file_matches', 'file_not_matches', 'query_empty', 'query_nonempty'];
+const CHECK_KINDS = ['file_exists', 'file_absent', 'file_matches', 'file_not_matches', 'query_empty', 'query_nonempty', 'query_matches', 'query_not_matches'];
 
 function evaluatorsDir(osDir) {
   return path.join(osDir, 'evaluators');
@@ -53,6 +53,11 @@ function validateEvaluatorDef(def) {
   if (!def.id) errors.push('id欠落');
   if (!METHODS.includes(def.method)) errors.push(`methodは ${METHODS.join('|')}`);
   if (!def.tier || !/^T[0-3]$/.test(def.tier)) errors.push('tierはT0..T3');
+  // scope: このEvaluatorがどのリポジトリで実行されるか。多リポジトリ横断タスクでは
+  // evaluatorごとに実行ディレクトリが違うため、単一のwork_dirでは検証先を誤る。
+  if (def.scope !== undefined && (typeof def.scope !== 'string' || !def.scope)) {
+    errors.push('scopeは非空の文字列（対象リポジトリのscope名）');
+  }
   if (def.method === 'deterministic') {
     if (!Array.isArray(def.checks) || def.checks.length === 0) errors.push('deterministicはchecks必須');
     for (const c of def.checks || []) {
@@ -60,6 +65,7 @@ function validateEvaluatorDef(def) {
       if (c && c.kind && c.kind.startsWith('file_') && !c.path) errors.push(`${c.kind}: path必須`);
       if (c && (c.kind === 'file_matches' || c.kind === 'file_not_matches') && !c.pattern) errors.push(`${c.kind}: pattern必須`);
       if (c && c.kind && c.kind.startsWith('query_') && !c.query) errors.push(`${c.kind}: query必須`);
+      if (c && (c.kind === 'query_matches' || c.kind === 'query_not_matches') && !c.pattern) errors.push(`${c.kind}: pattern必須`);
     }
   } else if (def.method === 'command') {
     if (!Array.isArray(def.argv) || def.argv.length === 0) errors.push('commandはargv配列必須（シェル文字列は禁止）');
@@ -95,6 +101,18 @@ function runDeterministic(osDir, def, { workDir }) {
         const res = runQuery(osDir, c.query, c.params || {});
         const ok = c.kind === 'query_empty' ? res.total === 0 : res.total > 0;
         evidence.push(`${c.kind} ${c.query}: total=${res.total} -> ${ok ? 'ok' : 'NG'}`);
+        if (!ok) failed = true;
+      } else if (c.kind === 'query_matches' || c.kind === 'query_not_matches') {
+        // 「この知識がQueryの返却枠に実際に入るか」を検査する。件数だけでは
+        // max_tokensの切詰めで重要な1件が落ちても気づけない
+        const res = runQuery(osDir, c.query, c.params || {});
+        const re = new RegExp(c.pattern);
+        const hit = res.results.some((r) => re.test(stableStringify(r)));
+        const ok = c.kind === 'query_matches' ? hit : !hit;
+        evidence.push(
+          `${c.kind} ${c.query} /${c.pattern}/: ${hit ? 'match' : 'no-match'} ` +
+          `(count=${res.count}/${res.total}${res.truncated ? ', truncated' : ''}) -> ${ok ? 'ok' : 'NG'}`
+        );
         if (!ok) failed = true;
       }
     } catch (e) {
@@ -241,10 +259,15 @@ function prepareLlmJudge(osDir, def, { task, artifacts }) {
   for (const a of task.artifacts || []) parts.push(`- ${a.path}${a.note ? ` — ${a.note}` : ''}`);
   if (artifacts && artifacts.length) for (const a of artifacts) parts.push(`- ${a}`);
   parts.push('');
+  // context_queriesは常に空paramsで呼ばれていたため、横断タスクでも絞り込みが効かなかった。
+  // タスクの対象リポジトリをscopeとして渡す（カンマ区切りはOR = 触る全リポジトリの和集合）。
+  const queryParams = {};
+  const taskScopes = Object.keys(task.repo_dirs || {});
+  if (taskScopes.length) queryParams.scope = taskScopes.join(',');
   for (const q of def.context_queries || []) {
-    parts.push(`## Query: ${q}`);
+    parts.push(`## Query: ${q}${taskScopes.length ? `（scope=${queryParams.scope}）` : ''}`);
     try {
-      const res = runQuery(osDir, q, {});
+      const res = runQuery(osDir, q, queryParams);
       parts.push('```json');
       parts.push(JSON.stringify(res, null, 1));
       parts.push('```');
@@ -333,13 +356,34 @@ function getTask(osDir, id) {
 
 // extra: 引き継ぎに必要な作業文脈（work_dir=評価・作業対象ディレクトリ, refs=Issue/PR等のURL列, context=自由記述）。
 // タスクは会話ではなくOSが継続性の正本になる: 別プロセスがresumeしても task show だけで再開できる状態を保つ。
+// repo_dirs: scope → そのリポジトリでの作業ディレクトリ（worktree等）。横断タスクでは
+// evaluatorごとに実行先が違うため、単一のwork_dirでは検証先を誤る（api_testをRNのdirで走らせる等）。
 function newTask(osDir, objective, evaluators, extra = {}) {
   const byId = loadTasks(osDir);
   const id = nextId('T', Object.keys(byId), 3);
   const entry = { id, ts: nowIso(), objective, status: 'open', artifacts: [], evaluators: evaluators || [] };
   if (extra.work_dir) entry.work_dir = extra.work_dir;
+  if (extra.repo_dirs && Object.keys(extra.repo_dirs).length) entry.repo_dirs = extra.repo_dirs;
   if (extra.refs && extra.refs.length) entry.refs = extra.refs;
   if (extra.context) entry.context = extra.context;
+  // 実行先が決まらないevaluatorを登録させない（登録時に落とす方が、評価時に誤ったdirで
+  // PASSを出すより安全。評価Evaluatorの選定を後から緩めるのは禁止という規律とも整合する）
+  const missing = [];
+  for (const evId of entry.evaluators) {
+    let def;
+    try {
+      def = loadEvaluatorDef(osDir, evId);
+    } catch {
+      continue; // 存在しないevaluatorはcheckAll側で報告される
+    }
+    if (def.scope && !(entry.repo_dirs && entry.repo_dirs[def.scope])) missing.push(`${evId}(scope=${def.scope})`);
+  }
+  if (missing.length) {
+    throw new Error(
+      `evaluatorの実行先ディレクトリが未指定: ${missing.join(', ')}。` +
+      '--repos <scope>[=<dir>],... で対象リポジトリを登録せよ（=dir省略時はgoal.yaml sourcesのrepoを使う）'
+    );
+  }
   appendJsonl(tasksFile(osDir), entry);
   return entry;
 }
@@ -406,8 +450,31 @@ function evaluateTask(osDir, taskId, { only, workDir, replay } = {}) {
       }
       continue;
     }
-    // work-dir未指定時はタスク登録時のwork_dirを使う（worktree運用で誤って本体を評価する事故を防ぐ）
-    const effectiveWorkDir = workDir || task.work_dir || process.cwd();
+    // 実行ディレクトリの決定順:
+    //   ① def.scope が宣言されていれば task.repo_dirs[scope]（--work-dirでも上書きさせない。
+    //      横断タスクで一括指定されたdirがscope付きevaluatorを誤った場所で走らせる事故を防ぐ）
+    //   ② scope無しのevaluatorは --work-dir → task.work_dir → cwd
+    let effectiveWorkDir;
+    if (def.scope) {
+      effectiveWorkDir = (task.repo_dirs || {})[def.scope];
+      if (!effectiveWorkDir) {
+        // 実行先不明のまま走らせて誤ったPASSを出さない。証拠不足として扱いループを止めない
+        const entry = recordVerdict(osDir, {
+          task: taskId,
+          evaluator: evId,
+          verdict: 'UNCERTAIN',
+          evidence: [`scope=${def.scope} の作業ディレクトリがタスクに登録されていない`],
+          reason: 'insufficient_evidence',
+          provenance: 'deterministic',
+          tier: def.tier,
+          tokens: 0,
+        });
+        results.push({ evaluator: evId, method: def.method, ...entry });
+        continue;
+      }
+    } else {
+      effectiveWorkDir = workDir || task.work_dir || process.cwd();
+    }
     const r = def.method === 'deterministic'
       ? runDeterministic(osDir, def, { workDir: effectiveWorkDir })
       : runCommand(def, { workDir: effectiveWorkDir });

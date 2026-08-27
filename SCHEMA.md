@@ -61,14 +61,18 @@ autonomy:
     - architectural_ambiguity
 optimization:
   - correctness
-sources:
-  - repo: .
+sources:                             # 知識の取込対象。多リポジトリ横断が前提
+  - scope: service-api               # World Model上の宛先名（省略時はrepoのbasename）
+    repo: /abs/path/to/repo          # 相対パスは .os/ の親ディレクトリ基準
+    rule_docs: [CLAUDE.md]           # 作業規約Markdown。見出し単位でplaybook Statement化
+    memory_dir: /abs/path/to/memory  # 1ファイル1事実のfrontmatter付きMarkdown索引
 notes: |
   ヒアリング原文などの自由記述
 ```
 
 制約: `success_criteria[].evaluator` と `constraints[].evaluator` は必須
 （未実装なら `unbound`）。`autopoiesys validate` が unbound を集計・警告する。
+`sources[].scope` は重複不可（別リポジトリの知識が同じ宛先に混ざる事故を防ぐ）。
 
 ## Statement（world_model/events.jsonl の1行）
 
@@ -76,7 +80,7 @@ notes: |
 {"id":"S0001","ts":"2026-08-26T00:00:00Z","type":"claim","body":"...",
  "subject":"S0002","predicate":"affects","object":"S0003",
  "links":[{"role":"supports","to":"obs-ab12cd34ef"}],
- "status":"hypothesis","confidence":0.61,"tags":["retention"],
+ "status":"hypothesis","confidence":0.61,"tags":["retention"],"scope":["service-api"],
  "provenance":{"source":"discover-domain","method":"llm","session":"R001"},
  "supersedes":"S0000"}
 ```
@@ -89,6 +93,15 @@ notes: |
 - `confidence`: 0..1（任意）
 - `provenance.method`: deterministic | llm | human
 - `provenance.task`: 任意。run-task中の還流（`statement add|supersede`）で出所タスクを記録する
+- `provenance.series`: 任意。決定的取込が「同じ観測対象の世代」を識別するキー。
+  再取込時は (scope, series) が一致する現在Statementをsupersedeする（冪等の実装根拠）
+- `scope`: 任意。このStatementが適用される宛先（対象リポジトリ）の配列。
+  `tags` が「話題」、`scope` が「宛先」という分離であり、両者は別フィールドなので
+  Queryの `where` で **AND** に組める（同一フィールドの複数値はORにしかならない）。
+  複数要素は横断知識（例: `["service-api","mobile-app"]` = 両者間の契約）を表し、
+  どちらのscopeで引いても返る。**省略は「宛先に依らない知識」**（製品仕様・ビジネス構造等）を
+  意味し、scope絞りのQueryには乗らない代わりに話題tagで引ける。
+  値は `world_model/vocabulary.yaml` の `scopes` が登録簿（未登録はcheckで全件警告）
 - 必須: id, ts, type, body, status, provenance
 
 ## Query定義（queries/*.yaml）
@@ -123,6 +136,13 @@ pipelineステップ（エンジン実装済みの全語彙）:
 
 ## Evaluator仕様（evaluators/*.yaml）
 
+共通フィールド: `id` / `method`（deterministic | command | llm_judge）/ `tier`（T0..T3）。
+`scope`（任意・文字列）は「このEvaluatorがどのリポジトリで実行されるか」を宣言する。
+宣言すると実行ディレクトリは `task.repo_dirs[scope]` に固定され、`evaluate --work-dir` では
+上書きされない（横断タスクで一括指定したdirがscope付きEvaluatorを誤った場所で走らせるのを防ぐ）。
+scopeが宣言されているのにタスクに対応するdirが無い場合、`task new` は登録時にエラーになり、
+評価時に到達した場合は UNCERTAIN（reason: insufficient_evidence）を記録する。
+
 共通: `id`, `applies_to`（自由ラベル）, `tier`（T0|T1|T2|T3）, `method`
 
 ```yaml
@@ -132,14 +152,21 @@ applies_to: repo_change
 tier: T0
 method: deterministic
 checks:
-  - kind: file_exists          # file_exists | file_absent | file_matches |
-    path: README.md            # file_not_matches | query_empty | query_nonempty
+  - kind: file_exists          # file_exists | file_absent | file_matches | file_not_matches
+    path: README.md            # query_empty | query_nonempty | query_matches | query_not_matches
   - kind: file_not_matches
     path: core/store.js
     pattern: "console\\.log"
   - kind: query_empty
     query: find_violations
+  - kind: query_matches        # Queryの返却枠に実際にその知識が入るかを内容で検査する。
+    query: get_repo_playbook   # 件数だけでは max_tokens の切詰めで重要な1件が落ちても気づけない
+    params: { scope: service-api }
+    pattern: "go build"
 ```
+
+`query_*` は `query`（必須）と `params`（任意）を取り、`query_matches` /
+`query_not_matches` は加えて `pattern`（必須）を取る。
 
 ```yaml
 # method: command
@@ -192,6 +219,11 @@ replay（記録済みverdictのリプレイ。regressionやevaluateの--replay�
 Next Action Engine が COLLECT_EVIDENCE / DEEP_RESEARCH / RESOLVE_CONFLICT へ写像する。
 
 ## Task（tasks/tasks.jsonl の1行）
+
+`repo_dirs`（任意）は scope → 作業ディレクトリの対応。横断タスクではEvaluatorごとに
+実行先が違うため、単一の `work_dir` では検証先を誤る。CLIは
+`task new --repos <scope>[=<dir>],...` で受け取り、`=dir` 省略時は goal.yaml sources の
+`repo` を使う。
 
 ```json
 {"id":"T001","ts":"...","objective":"...","status":"open",

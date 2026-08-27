@@ -14,7 +14,8 @@ Task → Code → Done ではなく、Objective → Plan → Execute → Evaluat
 それ以外の固定費はタスク規模に応じてスケールさせる。迷ったら大タスク側に倒す:
 
 - **小タスク**（目安: 変更1〜2ファイル・調査不要・可逆・不慣れな領域に触れない）:
-  - Queryは制約系1本を関連タグで絞るだけでよい（全Queryの実行は不要）
+  - Queryは手順2①（作法）と②の制約系1本まで。③横断契約と失敗パターン系は省略してよい。
+    **①は小タスクでも省略できない** — 規約違反は変更の大きさに比例しないため
   - noteはフェーズ境界ごとでなく、実装完了時の1回でよい
   - 完了報告は5行以内（検証コマンドと結果・要件との対応のみ）
   - evaluatorはtask new時点で関連する最小構成にする（登録後に緩めるのは禁止のまま）
@@ -28,25 +29,51 @@ Task → Code → Done ではなく、Objective → Plan → Execute → Evaluat
    **継続性の正本は会話ではなくタスク台帳**であり、別プロセスがresumeしても
    `task show` だけで再開できる状態を保つ:
 
-       node cli/index.js task new "<objective>" --evaluators <e1>,<e2> --work-dir <対象dir> --refs <issue-url>
+       node cli/index.js task new "<objective>" --evaluators <e1>,<e2> \
+         --repos <scope>[=<dir>],... --refs <issue-url>
 
-   `--work-dir` は command/deterministic evaluatorの実行ディレクトリの既定値になる
-   （`evaluate --work-dir` は上書き用）。
+   **横断が常態なので、触るリポジトリはすべて `--repos` に登録する**（1つでも登録する）。
+   scope名は goal.yaml sources に登録されているもの（`node cli/index.js query` の前に
+   goal.yaml を確認するか、存在しないscopeを渡してエラーメッセージの一覧を見る）。
+   worktreeで作業する場合は `<scope>=<worktreeのパス>` と明示する（省略時はsourcesのrepo）。
+
+   evaluatorは `scope:` を宣言していれば、そのリポジトリのディレクトリで実行される。
+   実行先が決まらないevaluatorを含めるとtask newが**登録時に失敗する** —
+   誤ったディレクトリで検証してPASSを出す事故を防ぐための意図的な失敗なので、
+   evaluatorを外すのではなく `--repos` に対象を足して解決すること。
+   scopeを持たないevaluator（report_integrity等）は `--work-dir` → cwd で走る。
 
 2. **文脈はQuery経由でのみ取得する**（T0）。World Model全体・events.jsonlの生読みは禁止。
-   Query名はOSごとに異なるため、まず実在するQueryを列挙してから選ぶ:
+   Query名はOSごとに異なるため、まず実在するQueryを列挙する（`node cli/index.js query`）。
 
-       node cli/index.js query            # 引数なしで一覧
-       node cli/index.js query <制約系Query>
-       node cli/index.js query <失敗パターン系Query>
+   取得は**3本立て**で、役割が違うので1本で済ませない:
 
-   制約と過去の失敗パターンを**実行前に**必ず読む。Queryがパラメータ
-   （where_param）を持つなら、タスクに関連するタグを渡して絞る。カンマ区切りで
-   複数タグのOR指定ができるため、リポジトリ名より狭い領域タグを優先する
-   （例: `--param tag=billing,test`。絞る軸が無いときだけ `--param tag=<対象リポジトリ名>`）。
-   全件読みはトークンの無駄で、goal.yamlのtoken_efficiencyに反する。
+   | # | 何を | いつ | 絞り方 |
+   |---|---|---|---|
+   | ① 作法 | 対象リポジトリでの禁止事項・運用ルール・検証手段 | **触るリポジトリごとに必ず1回** | `scope` |
+   | ② ドメイン | 製品仕様・ビジネス構造・過去の失敗パターン | タスクの話題に応じて | `tag` |
+   | ③ 横断契約 | リポジトリ間の契約・二重実装・リリース順序 | **2つ以上に触るなら組み合わせごとに** | `scope`×2 |
 
-3. 計画・実行（T1-T2）。作った成果物を登録する:
+       # ① 作法（scopeで引く。話題タグでは構造的に取り落とされる）
+       node cli/index.js query get_repo_playbook --param scope=<repo>
+       # ② ドメイン知識と既知の失敗パターン（scopeに依らない横断共通知識）
+       node cli/index.js query <制約系Query> --param tag=<領域タグ>
+       node cli/index.js query <失敗パターン系Query> --param tag=<領域タグ>
+       # ③ 横断契約（触る組み合わせごと）
+       node cli/index.js query get_cross_repo_contract --param repo_a=<A> --param repo_b=<B>
+
+   規律:
+   - **①を省略してはならない。** 作法系の知識は話題タグを持たないため、`tag` 絞りだけでは
+     構造的に落ちる。実際にこれでリポジトリ固有の禁止事項を取り落とし、独立評価のFAILまで
+     規約違反が検出されなかった実例がある
+   - ①が `truncated: true` で返ったら `next_offset` で続きを取る。規約を読み残して実装に入らない
+   - ②は `tag` で絞る（カンマ区切りはOR）。ここでリポジトリ名を渡す必要はない
+   - ③が0件なのは「まだ記録されていない」意味であって「契約が無い」意味ではない。
+     実装中に契約を見つけたら手順4で還流する
+
+3. 計画・実行（T1-T2）。**成果物は初見の読者がコンテキストなしで読解できるかを推敲してから**
+   登録する: 制作過程の記述（「初版は〜と判断したが」等）・セッション文脈への依存・内部タスクIDを
+   本文に混入させない。経緯は文末の「変更履歴」セクションに隔離する（F003由来）:
 
        node cli/index.js task artifact <id> --path <p> --note "<説明>"
 
@@ -62,8 +89,16 @@ Task → Code → Done ではなく、Objective → Plan → Execute → Evaluat
    - WMの既存Statementと実装の矛盾（仕様書由来の記述が実装と食い違う等）
    - ユーザーから受けた運用ルール・禁止事項
 
-       node cli/index.js statement add "<事実>" --type constraint --tags <t> --source <裏取り元> --task <id>
+       node cli/index.js statement add "<事実>" --type constraint --tags <t> \
+         --scope <repo> --source <裏取り元> --task <id>
        node cli/index.js statement supersede <S00xx> "<訂正後>" --source <裏取り元> --task <id>
+
+   `--scope` の付け方が知識の到達性を決める:
+   - 特定リポジトリの実装事実・作法 → `--scope <repo>`
+   - **リポジトリ間の契約**（proto互換・同じ判定の二重実装・リリース順序） →
+     `--scope <A>,<B>`。これを書き残すことが横断タスクの最大の資産になる
+   - 製品仕様・ビジネス構造など実装先に依らない知識 → `--scope` を付けない
+     （付けるとscope絞りのQueryに閉じ込められ、他リポジトリのタスクから見えなくなる）
 
    裏取りできていないものは status=hypothesis（--confidence必須）で書くか、書かない。
 

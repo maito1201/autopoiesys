@@ -153,7 +153,7 @@ const COMMANDS = {
   statement(args) {
     const osDir = requireOsDir(args.flags);
     const sub = args.positional[0];
-    const usage = '使い方: autopoiesys statement add "<body>" --type t --source s [--tags a,b] [--status fact|hypothesis|unknown] [--confidence 0.x] [--method llm|human|deterministic] [--task T001]\n' +
+    const usage = '使い方: autopoiesys statement add "<body>" --type t --source s [--tags a,b] [--scope repo1,repo2] [--status fact|hypothesis|unknown] [--confidence 0.x] [--method llm|human|deterministic] [--task T001]\n' +
       '        autopoiesys statement supersede <S00xx> "<訂正後body>" --source s [--type/--tags/--status は省略時に旧Statementから継承]\n' +
       '        autopoiesys statement show <S00xx>';
     if (sub === 'show') {
@@ -176,6 +176,7 @@ const COMMANDS = {
       type: args.flags.type ? String(args.flags.type) : undefined,
       status: args.flags.status ? String(args.flags.status) : undefined,
       tags: args.flags.tags ? String(args.flags.tags).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
+      scope: args.flags.scope ? String(args.flags.scope).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
       confidence: args.flags.confidence !== undefined ? Number(args.flags.confidence) : undefined,
       predicate: args.flags.predicate ? String(args.flags.predicate) : undefined,
       source: String(args.flags.source),
@@ -186,13 +187,74 @@ const COMMANDS = {
     return 0;
   },
 
+  // 決定的取込（LLMゼロ）。repo=構成とgit観測 / rules=作業規約ドキュメント / memory=自動メモリ索引。
+  // 対象は goal.yaml の sources（scopeで識別）から解決する。--scope 省略時は全source。
   ingest(args) {
     const osDir = requireOsDir(args.flags);
     const what = args.positional[0] || 'repo';
-    if (what !== 'repo') throw new Error(`未対応のingest対象: ${what}`);
-    const repo = args.flags.repo ? path.resolve(String(args.flags.repo)) : process.cwd();
-    const r = ingest.ingestRepo(osDir, repo);
-    out(r, args.flags);
+    // knowledge = 外部知識源（rules + memory）。repoはgit状態を観測するため常に変化しうるので、
+    // 同期状態の検査（--check）はknowledgeに対して行う
+    const KIND_SETS = { all: ['repo', 'rules', 'memory'], knowledge: ['rules', 'memory'] };
+    const kinds = KIND_SETS[what] || [what];
+    const dryRun = !!args.flags.check;
+    for (const k of kinds) {
+      if (!['repo', 'rules', 'memory'].includes(k)) {
+        throw new Error(`未対応のingest対象: ${k}（repo | rules | memory | all）`);
+      }
+    }
+    const sources = schema.resolveSources(schema.loadGoal(osDir), osDir);
+    let targets;
+    if (args.flags.repo) {
+      // 明示パス指定はsources未登録のリポジトリを一度だけ観測する用途。scopeは明示が必要
+      const repo = path.resolve(String(args.flags.repo));
+      targets = [{ scope: args.flags.scope ? String(args.flags.scope) : path.basename(repo), repo, rule_docs: [], memory_dir: null }];
+    } else if (args.flags.scope) {
+      const wanted = String(args.flags.scope).split(',').map((v) => v.trim()).filter(Boolean);
+      targets = sources.filter((sc) => wanted.includes(sc.scope));
+      const missing = wanted.filter((w) => !sources.some((sc) => sc.scope === w));
+      if (missing.length) throw new Error(`goal.yaml sources に無いscope: ${missing.join(', ')}（登録済み: ${sources.map((s) => s.scope).join(', ') || 'なし'}）`);
+    } else {
+      targets = sources;
+      if (!targets.length) {
+        // sources未定義のOSでは従来どおりカレントディレクトリを観測する
+        targets = [{ scope: path.basename(process.cwd()), repo: process.cwd(), rule_docs: [], memory_dir: null }];
+      }
+    }
+    const results = [];
+    for (const t of targets) {
+      for (const k of kinds) {
+        if (k === 'repo') {
+          results.push({ scope: t.scope, kind: 'repo', ...ingest.ingestRepo(osDir, t.repo, { scope: t.scope, dryRun }) });
+        } else if (k === 'rules') {
+          if (!t.rule_docs.length) continue;
+          results.push({ scope: t.scope, kind: 'rules', ...ingest.ingestRuleDocs(osDir, { scope: t.scope, repoRoot: t.repo, docs: t.rule_docs, dryRun }) });
+        } else if (k === 'memory') {
+          if (!t.memory_dir) continue;
+          results.push({ scope: t.scope, kind: 'memory', ...ingest.ingestMemoryIndex(osDir, { scope: t.scope, dir: t.memory_dir, dryRun }) });
+        }
+      }
+    }
+    if (!results.length) {
+      throw new Error(`取込対象がない（${kinds.join('/')} の入力が goal.yaml sources に定義されていない）`);
+    }
+    if (dryRun) {
+      // 未取込・更新済み未反映がある＝知識源とWorld Modelが同期していない。exit 1で検出可能にする
+      const stale = results.filter((r) => (r.would_add || []).length);
+      const missing = results.filter((r) => (r.missing_docs || []).length);
+      const pending = stale.reduce((n, r) => n + r.would_add.length, 0);
+      out({
+        check: true,
+        pending_total: pending,
+        out_of_sync: stale.map((r) => ({ scope: r.scope, kind: r.kind, would_add: r.would_add.length })),
+        missing_docs: missing.map((r) => ({ scope: r.scope, docs: r.missing_docs })),
+        message: pending || missing.length
+          ? `知識源がWorld Modelに反映されていない（未取込/更新 ${pending}件）。autopoiesys ingest ${what} を実行せよ`
+          : '同期済み',
+      }, args.flags);
+      return pending || missing.length ? 1 : 0;
+    }
+    const added = results.reduce((n, r) => n + r.added.length, 0);
+    out({ added_total: added, results }, args.flags);
     return 0;
   },
 
@@ -216,9 +278,29 @@ const COMMANDS = {
     const sub = args.positional[0];
     if (sub === 'new') {
       const objective = args.positional.slice(1).join(' ');
-      if (!objective) throw new Error('使い方: autopoiesys task new "<objective>" --evaluators a,b [--work-dir D] [--refs url1,url2] [--context "..."]');
+      if (!objective) throw new Error('使い方: autopoiesys task new "<objective>" --evaluators a,b [--repos <scope>[=<dir>],...] [--work-dir D] [--refs url1,url2] [--context "..."]');
       const evaluators = args.flags.evaluators ? String(args.flags.evaluators).split(',').map((s) => s.trim()).filter(Boolean) : [];
+      // --repos: 横断タスクが触るリポジトリ。scope→作業ディレクトリの対応を作る。
+      // =dir を省略した場合は goal.yaml sources のrepoを使う（worktreeで作業する場合は明示する）
+      const repoDirs = {};
+      if (args.flags.repos) {
+        const sources = schema.resolveSources(schema.loadGoal(osDir), osDir);
+        for (const spec of String(args.flags.repos).split(',').map((v) => v.trim()).filter(Boolean)) {
+          const eq = spec.indexOf('=');
+          const scope = eq === -1 ? spec : spec.slice(0, eq);
+          if (eq !== -1) {
+            repoDirs[scope] = path.resolve(spec.slice(eq + 1));
+            continue;
+          }
+          const src = sources.find((sc) => sc.scope === scope);
+          if (!src) {
+            throw new Error(`goal.yaml sources に無いscope: ${scope}（ディレクトリを明示するなら ${scope}=<dir> と書く）`);
+          }
+          repoDirs[scope] = src.repo;
+        }
+      }
       const t = evaluate.newTask(osDir, objective, evaluators, {
+        repo_dirs: repoDirs,
         work_dir: args.flags['work-dir'] ? path.resolve(String(args.flags['work-dir'])) : undefined,
         refs: args.flags.refs ? String(args.flags.refs).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
         context: args.flags.context ? String(args.flags.context) : undefined,
@@ -423,15 +505,31 @@ const COMMANDS = {
     return 0;
   },
 
+  // 形式移行。scope（Statementの宛先）導入分の後埋めをここで行う。
+  // 既定はdry-run。--apply で events.jsonl を書き換える（原本は .pre-scope-backfill に残る）。
   migrate(args) {
     const osDir = requireOsDir(args.flags);
     const cfg = schema.loadConfig(osDir);
+    const vocab = store.loadVocabulary(osDir);
+    const scopes = args.flags.scopes
+      ? String(args.flags.scopes).split(',').map((v) => v.trim()).filter(Boolean)
+      : vocab.scopes;
+    if (!scopes.length) {
+      throw new Error('scopeの登録簿が空。world_model/vocabulary.yaml に scopes: を定義するか --scopes a,b で渡せ');
+    }
+    const report = store.backfillScope(osDir, {
+      scopes,
+      fallbackScope: args.flags['fallback-scope'] ? String(args.flags['fallback-scope']) : undefined,
+      apply: !!args.flags.apply,
+    });
     out({
       current_format: cfg.format_version,
       core_format: schema.FORMAT_VERSION,
-      message: cfg.format_version === schema.FORMAT_VERSION
-        ? '移行不要'
-        : '形式が異なる。現時点で自動移行は未実装（format_version 0.xでは手動移行）',
+      scopes,
+      scope_backfill: report,
+      message: report.applied
+        ? 'scopeを後埋めした。check で整合を確認せよ'
+        : 'dry-run（--apply で適用）。scopeの写し先が意図どおりか by_scope を確認せよ',
     }, args.flags);
     return 0;
   },
@@ -445,10 +543,12 @@ const COMMANDS = {
   help() {
     process.stdout.write(`autopoiesys — Intelligence OSの決定的コア
 
-環境・初期化:   doctor / init [--dir D] [--force] / version / migrate
+環境・初期化:   doctor / init [--dir D] [--force] / version / migrate [--apply]
 検証:           validate / check / rebuild
-World Model:    assert --file s.json / statement add|supersede|show / ingest repo [--repo D] / query [name] [--param k=v]
-タスクと評価:   task new|list|show|note|artifact / evaluate --task T / verdict --file v.json / next-action T
+World Model:    assert --file s.json / statement add|supersede|show / query [name] [--param k=v]
+                ingest repo|rules|memory|knowledge|all [--scope S] [--repo D] [--check]
+タスクと評価:   task new [--repos <scope>[=<dir>],...] |list|show|note|artifact
+                evaluate --task T / verdict --file v.json / next-action T
 Failureループ:  feedback "..." / failure list|show|transition|lint / regression
 Token Economics: ledger add / research open|close|list / compile --file f.json / metrics
 

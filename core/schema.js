@@ -26,6 +26,26 @@ function loadGoal(osDir) {
   return readYamlFile(path.join(osDir, 'goal.yaml'));
 }
 
+// goal.yaml の sources を解決する。多リポジトリ横断が前提なので、各sourceは
+// scope（World Model上の宛先名）で一意に識別される。scope省略時はパスのbasenameを使う。
+// rule_docs / memory_dir は決定的取込（ingest rules / ingest memory）の入力。
+function resolveSources(goal, osDir) {
+  const workspace = path.dirname(path.resolve(osDir));
+  const out = [];
+  for (const src of (goal && goal.sources) || []) {
+    if (!src || !src.repo) continue;
+    const repo = path.resolve(workspace, String(src.repo));
+    const scope = src.scope || path.basename(repo);
+    out.push({
+      scope,
+      repo,
+      rule_docs: src.rule_docs || [],
+      memory_dir: src.memory_dir ? path.resolve(workspace, String(src.memory_dir)) : null,
+    });
+  }
+  return out;
+}
+
 // goal.yaml検証。unbound（evaluator未接地）の基準一覧も返す。
 function validateGoal(goal) {
   const errors = [];
@@ -55,6 +75,16 @@ function validateGoal(goal) {
         errors.push(`constraints ${item.id}: severityはhard|soft`);
       }
     }
+  }
+  const seenScopes = new Set();
+  for (const src of goal.sources || []) {
+    if (!src || !src.repo) {
+      errors.push('sources: 各項目にrepo（パス）が必要');
+      continue;
+    }
+    const scope = src.scope || path.basename(path.resolve(String(src.repo)));
+    if (seenScopes.has(scope)) errors.push(`sources: scopeが重複している: ${scope}`);
+    seenScopes.add(scope);
   }
   return { errors, unbound };
 }
@@ -175,6 +205,7 @@ module.exports = {
   FORMAT_VERSION,
   loadConfig,
   loadGoal,
+  resolveSources,
   validateGoal,
   validateConfig,
   validateGoldenTask,
