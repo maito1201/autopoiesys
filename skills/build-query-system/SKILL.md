@@ -22,6 +22,10 @@ QueryはOS Builderが領域に応じて設計するものであり、固定API�
    設計規律:
    - **max_tokensを必ず宣言する**（無制限Queryは作れない — §26⑤）
    - 1 Query = 1 目的。descriptionに「いつ使うQueryか」を書く
+   - **絞り込み軸を設計する**: where_paramのタグ絞りが実際に効くのは、タグ語彙に
+     リポジトリ名だけでなく領域軸（ドメイン・作業種別: billing / migration / test 等）が
+     あるとき。Statement蓄積時のタグ付けと合わせて設計する。paramのカンマ区切りは
+     OR条件として解釈される（`--param tag=billing,test`）
    - 可能なら golden（期待件数など）を添えてQuery自体を回帰対象にする
 
 3. 動作確認:

@@ -79,6 +79,38 @@ test('未登録predicateは警告（strictでエラー）', () => {
   );
 });
 
+test('タグ警告は真の初出のみ（使用実績があれば繰り返さない・strictはエラー）', () => {
+  const { osDir } = makeOs();
+  const r1 = store.assertStatements(osDir, [statement('S0001', 'claim', 'a', { tags: ['billing'] })]);
+  assert.strictEqual(r1.warnings.filter((w) => w.includes('初出のtag: billing')).length, 1);
+  // 使用実績のあるタグは警告しない。同一バッチ内の新タグ再利用も初出の1回だけ
+  const r2 = store.assertStatements(osDir, [
+    statement('S0002', 'claim', 'b', { tags: ['billing', 'payment'] }),
+    statement('S0003', 'claim', 'c', { tags: ['payment'] }),
+  ]);
+  const tagWarnings = r2.warnings.filter((w) => w.includes('初出のtag'));
+  assert.strictEqual(tagWarnings.length, 1);
+  assert.ok(tagWarnings[0].includes('payment'));
+  // strictは使用実績に関係なく未登録タグをエラーにする
+  assert.throws(
+    () => store.assertStatements(osDir, [statement('S0004', 'claim', 'd', { tags: ['billing'] })], { strict: true }),
+    /未登録のtag/
+  );
+});
+
+test('lintWorldModel: 使用中未登録タグはper-statement警告でなく集計1行', () => {
+  const { osDir } = makeOs();
+  store.assertStatements(osDir, [
+    statement('S0001', 'claim', 'a', { tags: ['billing'] }),
+    statement('S0002', 'claim', 'b', { tags: ['billing', 'payment'] }),
+  ]);
+  const r = store.lintWorldModel(osDir);
+  assert.ok(!r.warnings.some((w) => w.includes('初出のtag')));
+  const agg = r.warnings.filter((w) => w.includes('使用中だが未登録のtag'));
+  assert.strictEqual(agg.length, 1);
+  assert.match(agg[0], /billing\(2\), payment\(1\)/);
+});
+
 test('recordStatement: add はデフォルト補完と provenance.task を記録する', () => {
   const { osDir } = makeOs();
   const r = store.recordStatement(osDir, {

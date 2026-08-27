@@ -231,7 +231,9 @@ const COMMANDS = {
       const id = args.positional[1];
       const note = args.positional.slice(2).join(' ');
       if (!id || !note) throw new Error('使い方: autopoiesys task note <id> "<チェックポイント>"');
-      out(evaluate.addTaskNote(osDir, id, note), args.flags);
+      // 全量再表示はトークンの無駄（全体は task show で見る）。追記の受理確認だけ返す
+      const t = evaluate.addTaskNote(osDir, id, note);
+      out({ task: t.id, notes: (t.notes || []).length, added: note }, args.flags);
       return 0;
     }
     if (sub === 'list') {
@@ -247,13 +249,15 @@ const COMMANDS = {
       if (!id || !args.flags.path) throw new Error('使い方: autopoiesys task artifact <id> --path <p> [--note <n>]');
       const t = evaluate.getTask(osDir, id);
       const artifacts = [...(t.artifacts || []), { path: String(args.flags.path), note: args.flags.note ? String(args.flags.note) : '' }];
-      out(evaluate.updateTask(osDir, id, { artifacts }), args.flags);
+      evaluate.updateTask(osDir, id, { artifacts });
+      out({ task: id, artifacts: artifacts.length, added: String(args.flags.path) }, args.flags);
       return 0;
     }
     if (sub === 'set-evaluators') {
       const id = args.positional[1];
       const evaluators = String(args.flags.evaluators || '').split(',').map((s) => s.trim()).filter(Boolean);
-      out(evaluate.updateTask(osDir, id, { evaluators }), args.flags);
+      evaluate.updateTask(osDir, id, { evaluators });
+      out({ task: id, evaluators }, args.flags);
       return 0;
     }
     throw new Error('使い方: autopoiesys task new|list|show|note|artifact|set-evaluators');

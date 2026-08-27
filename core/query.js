@@ -77,8 +77,13 @@ function execPipeline(snapshot, pipeline, params) {
       }
     } else if (op === 'where_param') {
       const paramName = arg.contains || arg.equals;
-      const val = params[paramName];
+      let val = params[paramName];
       if (val !== undefined && val !== null && val !== '') {
+        // カンマ区切りはOR条件（例: tag=billing,test）。tag等の値自体には
+        // カンマが現れない前提（CLIの--tagsもカンマを区切りとして扱う）
+        if (typeof val === 'string' && val.includes(',')) {
+          val = val.split(',').map((s) => s.trim()).filter(Boolean);
+        }
         rows = rows.filter((r) => matchField(r, arg.field, val));
       }
     } else if (op === 'expand') {

@@ -102,7 +102,7 @@ params:
 pipeline:
   - select: { type: constraint }
   - where: { status: [fact, hypothesis] }
-  - where_param: { field: tags, contains: tag }   # paramが与えられた時のみ適用
+  - where_param: { field: tags, contains: tag }   # paramが与えられた時のみ適用。カンマ区切りはOR（tag=billing,test）
   - expand: { roles: [supports, counters], direction: in, limit: 3 }
   - sort: { by: confidence, order: desc }
   - project: [id, body, status, confidence, tags, linked]

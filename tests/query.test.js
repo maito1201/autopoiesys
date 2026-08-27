@@ -56,6 +56,30 @@ test('where_paramはパラメータ指定時のみ適用', () => {
   assert.strictEqual(runQuery(osDir, 'by_tag', { tag: 'repo' }).count, 1);
 });
 
+test('where_paramのカンマ区切りはOR条件（複数タグ絞り込み）', () => {
+  const { osDir } = makeOs();
+  store.assertStatements(osDir, [
+    statement('S0001', 'constraint', '請求の制約', { tags: ['billing'] }),
+    statement('S0002', 'constraint', 'テストの制約', { tags: ['test'] }),
+    statement('S0003', 'constraint', '移行の制約', { tags: ['migration'] }),
+  ]);
+  write(osDir, 'queries/by_tag.yaml', [
+    'name: by_tag',
+    'description: タグ絞込',
+    'params:',
+    '  tag:',
+    '    required: false',
+    'pipeline:',
+    '  - select: { type: constraint }',
+    '  - where_param: { field: tags, contains: tag }',
+    '  - project: [id]',
+  ].join('\n'));
+  assert.strictEqual(runQuery(osDir, 'by_tag', { tag: 'billing' }).count, 1);
+  const r = runQuery(osDir, 'by_tag', { tag: 'billing,test' });
+  assert.strictEqual(r.count, 2);
+  assert.deepStrictEqual(r.results.map((x) => x.id), ['S0001', 'S0002']);
+});
+
 test('max_tokens強制: 切詰めとnext_offset、実行ログ記録', () => {
   const { osDir } = makeOs();
   const many = [];

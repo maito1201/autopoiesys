@@ -32,8 +32,22 @@ function loadVocabulary(osDir) {
   return { predicates: v.predicates || [], tags: v.tags || [] };
 }
 
+// 既存イベントで使用実績のあるtag/predicate（登録簿とは別の「既成事実」の語彙）。
+// 登録簿(vocabulary.yaml)との照合だけだと、一度warning付きで通った語彙に対して
+// 以後の還流のたびに同じ警告を繰り返してノイズになるため、警告は真の初出に限る。
+function usedVocabulary(events) {
+  const tags = new Set();
+  const predicates = new Set();
+  for (const e of events) {
+    for (const t of e.tags || []) tags.add(t);
+    if (e.predicate) predicates.add(e.predicate);
+  }
+  return { tags, predicates };
+}
+
 // 1件のStatementを検証する。knownIds には既存+同一バッチのIDを渡す。
-function validateStatement(st, { knownIds, vocab, strict }) {
+// used（使用実績のある語彙）を渡すと、非strict時は初出の語彙のみ警告する。
+function validateStatement(st, { knownIds, vocab, used, strict }) {
   const errors = [];
   const warnings = [];
   const label = st && st.id ? st.id : '(no id)';
@@ -74,16 +88,19 @@ function validateStatement(st, { knownIds, vocab, strict }) {
     errors.push(`${label}: tagsは文字列の配列`);
   }
   if (st.predicate && vocab && !vocab.predicates.includes(st.predicate)) {
-    const msg = `${label}: 未登録のpredicate: ${st.predicate}（vocabulary.yamlに登録推奨）`;
-    if (strict) errors.push(msg);
-    else warnings.push(msg);
+    if (strict) {
+      errors.push(`${label}: 未登録のpredicate: ${st.predicate}（strict_vocabulary有効。vocabulary.yamlに登録が必要）`);
+    } else if (!used || !used.predicates.has(st.predicate)) {
+      warnings.push(`${label}: 初出のpredicate: ${st.predicate}（typoでなければそのまま使える。安定したら world_model/vocabulary.yaml に登録）`);
+    }
   }
   if (Array.isArray(st.tags) && vocab) {
     for (const t of st.tags) {
-      if (!vocab.tags.includes(t)) {
-        const msg = `${label}: 未登録のtag: ${t}`;
-        if (strict) errors.push(msg);
-        else warnings.push(msg);
+      if (vocab.tags.includes(t)) continue;
+      if (strict) {
+        errors.push(`${label}: 未登録のtag: ${t}（strict_vocabulary有効。vocabulary.yamlに登録が必要）`);
+      } else if (!used || !used.tags.has(t)) {
+        warnings.push(`${label}: 初出のtag: ${t}（typoでなければそのまま使える。安定したら world_model/vocabulary.yaml に登録）`);
       }
     }
   }
@@ -117,10 +134,14 @@ function assertStatements(osDir, statements, { strict = false } = {}) {
     batchIds.add(st.id);
     accepted.push(st);
   }
+  const used = usedVocabulary(existing);
   for (const st of accepted) {
-    const { errors, warnings } = validateStatement(st, { knownIds: batchIds, vocab, strict });
+    const { errors, warnings } = validateStatement(st, { knownIds: batchIds, vocab, used, strict });
     allErrors.push(...errors);
     allWarnings.push(...warnings);
+    // 同一バッチ内の再利用は警告しない（初出の1回だけ）
+    for (const t of st.tags || []) used.tags.add(t);
+    if (st.predicate) used.predicates.add(st.predicate);
     toAdd.push(st);
   }
   if (allErrors.length) {
@@ -225,11 +246,15 @@ function getSnapshot(osDir) {
   return rebuildSnapshot(osDir);
 }
 
-// リンク整合・語彙のlint（`autopoiesys check` 用）
+// リンク整合・語彙のlint（`autopoiesys check` 用）。
+// 既存Statementの語彙は使用実績＝既知として扱い、per-statement警告は出さない
+// （全件再検証のたびに同じ警告が数十件並ぶノイズを防ぐ）。
+// 代わりに登録簿(vocabulary.yaml)との乖離を集計1行で可視化する。
 function lintWorldModel(osDir, { strict = false } = {}) {
   const events = loadEvents(osDir);
   const ids = new Set(events.map((e) => e.id));
   const vocab = loadVocabulary(osDir);
+  const used = usedVocabulary(events);
   const errors = [];
   const warnings = [];
   const seen = new Set();
@@ -239,9 +264,22 @@ function lintWorldModel(osDir, { strict = false } = {}) {
       warnings.push(`${st.id}: idが重複している（後の行が優先されない点に注意）`);
     }
     seen.add(st.id);
-    const { errors: e, warnings: w } = validateStatement(st, { knownIds: ids, vocab, strict });
+    const { errors: e, warnings: w } = validateStatement(st, { knownIds: ids, vocab, used, strict });
     errors.push(...e);
     warnings.push(...w);
+  }
+  // 使用実績はあるが未登録の語彙（使用数順）。strict時はvalidateStatementがエラー化済み
+  if (!strict) {
+    const tagCounts = {};
+    for (const st of events) for (const t of st.tags || []) if (!vocab.tags.includes(t)) tagCounts[t] = (tagCounts[t] || 0) + 1;
+    const unregistered = Object.entries(tagCounts).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+    if (unregistered.length) {
+      const top = unregistered.slice(0, 10).map(([t, n]) => `${t}(${n})`).join(', ');
+      warnings.push(
+        `使用中だが未登録のtagが${unregistered.length}種: ${top}${unregistered.length > 10 ? ' …' : ''}` +
+        '（安定した語彙は world_model/vocabulary.yaml への登録を検討）'
+      );
+    }
   }
   return { errors, warnings, count: events.length };
 }
