@@ -7,8 +7,53 @@ const { getSnapshot } = require('./store');
 const { estimateTokens, appendJsonl, nowIso, stableStringify, readTextFile } = require('./util');
 const { parseYaml } = require('./yaml');
 
-const PIPELINE_STEPS = ['select', 'where', 'where_param', 'expand', 'sort', 'project', 'limit'];
+const PIPELINE_STEPS = ['select', 'where', 'where_param', 'expand', 'sort', 'project', 'limit', 'traverse'];
 const DEFAULT_MAX_TOKENS = 2000;
+const TRAVERSE_MAX_DEPTH = 8;
+
+// 統合辺索引（edges_out/edges_in）上の決定的BFS。到達ノードを rows として返す。
+// 各行に depth と path（経由辺の列）が付く — path が Reasoning Path の実体（CONCEPTv2 §8）。
+function traverseGraph(snapshot, startId, { kinds, direction, depth, limit }) {
+  const edgesOut = snapshot.indexes.edges_out || {};
+  const edgesIn = snapshot.indexes.edges_in || {};
+  const visited = new Set([startId]);
+  const rows = [];
+  const toRow = (id, d, pathArr) => {
+    const st = snapshot.statements[id];
+    const row = st ? { ...st } : { id, type: 'ref', body: id, status: 'fact' };
+    row.depth = d;
+    row.path = pathArr;
+    return row;
+  };
+  rows.push(toRow(startId, 0, []));
+  let frontier = [{ id: startId, path: [] }];
+  for (let d = 1; d <= Math.min(depth, TRAVERSE_MAX_DEPTH) && frontier.length; d++) {
+    const nextFrontier = [];
+    for (const { id, path: pathArr } of frontier) {
+      const candidates = [];
+      if (direction === 'out' || direction === 'both') {
+        for (const e of edgesOut[id] || []) candidates.push({ next: e.to, e });
+      }
+      if (direction === 'in' || direction === 'both') {
+        for (const e of edgesIn[id] || []) candidates.push({ next: e.from, e });
+      }
+      // 決定的順序: 到達先id → 辺種 → 経由idでソート
+      candidates.sort((a, b) => (a.next < b.next ? -1 : a.next > b.next ? 1 : a.e.kind < b.e.kind ? -1 : a.e.kind > b.e.kind ? 1 : a.e.via < b.e.via ? -1 : 1));
+      for (const { next, e } of candidates) {
+        if (kinds && !kinds.includes(e.kind)) continue;
+        if (visited.has(next)) continue;
+        visited.add(next);
+        const step = { kind: e.kind, via: e.via, from: e.from, to: e.to };
+        const newPath = [...pathArr, step];
+        rows.push(toRow(next, d, newPath));
+        nextFrontier.push({ id: next, path: newPath });
+        if (rows.length >= limit) return rows;
+      }
+    }
+    frontier = nextFrontier;
+  }
+  return rows;
+}
 
 function queryDir(osDir) {
   return path.join(osDir, 'queries');
@@ -108,6 +153,20 @@ function execPipeline(snapshot, pipeline, params) {
         }
         r.linked = linked.slice(0, limit);
       }
+    } else if (op === 'traverse') {
+      // rowsを置き換える起点つき多段走査。起点は from（固定id）または from_param（実行時パラメータ）
+      const startId = arg.from !== undefined ? String(arg.from)
+        : (arg.from_param ? params[arg.from_param] : undefined);
+      if (!startId) throw new Error('traverse: from または from_param の値が必要');
+      if (!snapshot.statements[String(startId)]) {
+        throw new Error(`traverse: 起点が現在状態に存在しない: ${startId}`);
+      }
+      rows = traverseGraph(snapshot, String(startId), {
+        kinds: arg.kinds || null,
+        direction: arg.direction || 'out',
+        depth: arg.depth || 3,
+        limit: arg.limit || 50,
+      });
     } else if (op === 'sort') {
       const by = arg.by || 'id';
       const desc = (arg.order || 'asc') === 'desc';
@@ -323,4 +382,4 @@ function auditReachability(osDir, { maxCombos = 500, maxRunsPerQuery = 4000, max
   };
 }
 
-module.exports = { runQuery, auditReachability, loadQueryDef, listQueries, validateQueryDef, PIPELINE_STEPS };
+module.exports = { runQuery, auditReachability, loadQueryDef, listQueries, validateQueryDef, traverseGraph, PIPELINE_STEPS };

@@ -1,6 +1,7 @@
 # SCHEMA.md — `.os/` オンディスク形式契約
 
-format_version: **0.1.0**（semver。`.os/config.yaml` に記録され、非互換変更は `autopoiesys migrate` が吸収する）
+format_version: **0.2.0**（semver。`.os/config.yaml` に記録され、非互換変更は `autopoiesys migrate` が吸収する。
+0.2はIntelligence Graph — relationship第一級化・capability型・traverse・gap — の追加的変更のみで、0.1のOSはそのまま有効）
 
 これは OSS Core とユーザー固有OS（`.os/`）を繋ぐ唯一の契約である。
 Core はここに定義された形式以外を読み書きしない。`.os/` の外にも書かない。
@@ -97,10 +98,9 @@ vendor / node_modules / Pods / dist 等の他人の規約は対象外）。
 ```
 
 - `type`: entity | relationship | observation | claim | evidence | hypothesis |
-  unknown | decision | constraint | goal | outcome | failure
+  unknown | decision | constraint | goal | outcome | failure | capability
 - `status`: fact | hypothesis | unknown | retracted
 - `links[].role`: supports | counters | about | derived_from | relates_to | caused_by | prevents
-- `subject/predicate/object`: relationship用（任意）。predicateはvocabulary登録制（既定は警告）
 - `confidence`: 0..1（任意）
 - `provenance.method`: deterministic | llm | human
 - `provenance.task`: 任意。run-task中の還流（`statement add|supersede`）で出所タスクを記録する
@@ -114,6 +114,41 @@ vendor / node_modules / Pods / dist 等の他人の規約は対象外）。
   意味し、scope絞りのQueryには乗らない代わりに話題tagで引ける。
   値は `world_model/vocabulary.yaml` の `scopes` が登録簿（未登録はcheckで全件警告）
 - 必須: id, ts, type, body, status, provenance
+
+## Relation（type: relationship のStatement — 第一級の関係）
+
+関係には2層ある:
+
+- **links[]** — Statementについての軽量配管（証拠の極性・由来）。属性は `{role, to}` のみ
+- **relationship Statement** — confidence・条件・証拠を持つ領域知識の第一級の辺。
+  独立したStatementなので、端点に触れずに単体でsupersede/retractできる
+
+```json
+{"id":"R0001","ts":"...","type":"relationship",
+ "subject":"S0020","predicate":"requires","object":"evaluator:tests_pass",
+ "body":"この能力の完了はテストで判定される",
+ "status":"hypothesis","confidence":0.8,
+ "conditions":["初期構築フェーズ"],"exceptions":["緊急時"],
+ "links":[{"role":"derived_from","to":"S0028"}],
+ "provenance":{"source":"decompose-goal","method":"llm"}}
+```
+
+- `subject` / `predicate` / `object`: **relationshipでは必須**。端点（subject/object）は
+  World Model内のStatement ID、または次の型付き参照:
+  `evaluator:<id>` `query:<name>` `golden_task:<id>` `task:<id>` `failure:<id>` `skill:<name>`
+  — コアが該当台帳への実在を検証する（**実在しない束縛は書き込めない**）
+- `predicate`: vocabulary.yaml登録制（未登録は初出警告、strict時エラー）。初期登録は
+  affects / depends_on / requires / causes / contradicts / evaluated_by / measured_by。
+  それ以外（enables / prevents / applies_when 等）は需要駆動で追加する
+- `conditions[]` / `exceptions[]`: この関係が成立する条件・例外（文字列配列・任意）
+- 同一の関係を異なる確信度・証拠で主張する場合は**別Statementとして併存**させ、
+  supersedes / counters リンクで淘汰する（confidence 0.61の辺と0.98+証拠の辺は同一視されない）
+- CLI糖衣: `autopoiesys relate <subject> <predicate> <object> "<説明>" --source s [--confidence 0.x] [--conditions a,b]`
+
+snapshotには統合辺索引 `indexes.edges_out` / `edges_in`
+（relationship辺とlinks辺を `{from, to, kind, via, confidence?, status?}` に統合したビュー）が
+構築され、traverse / gap の基盤になる。snapshot metaの `schema_version` が索引形式の版で、
+不一致時は自動再生成される。
 
 ## Query定義（queries/*.yaml）
 
@@ -139,7 +174,20 @@ golden:                       # 任意。regression対象になる
 
 pipelineステップ（エンジン実装済みの全語彙）:
 `select`（フィールド等値/所属）/ `where` / `where_param` / `expand`（リンク先添付）/
-`sort` / `project` / `limit`。これ以外はエラー。
+`sort` / `project` / `limit` / `traverse`。これ以外はエラー。
+
+`traverse` — 統合辺索引上の決定的BFS。行集合を「起点から到達したノード群」に置き換える:
+
+```yaml
+  - traverse: { from_param: root, kinds: [requires, evaluated_by], direction: out, depth: 3, limit: 50 }
+```
+
+- `from`（固定ID）または `from_param`（実行時パラメータ）で起点を指定（現在状態に実在必須）
+- `kinds`: 辿る辺種の許可リスト（省略時は全種）。`direction`: out | in | both（既定 out）
+- `depth`: 最大ホップ数（既定3、上限8）。`limit`: 最大到達ノード数（既定50）
+- 各行に `depth` と `path`（経由辺 `{kind, via, from, to}` の列 = Reasoning Path）が付く。
+  World Model外の型付き参照に到達した場合は `{id, type: "ref"}` の行になる
+- 用途: Reasoning Context生成（CONCEPTv2 §8）。max_tokens強制・query_log記録は他のQueryと同一
 
 出力: `{query, params, count, total, truncated, results[]}`。
 概算トークン（文字数/4）が max_tokens を超えると results を切詰め `truncated: true` と
@@ -263,7 +311,7 @@ Next Action Engine が COLLECT_EVIDENCE / DEEP_RESEARCH / RESOLVE_CONFLICT へ�
 |---|---|
 | reported | symptom, source, severity, fingerprint(自動) |
 | investigated | root_cause, why_undetected |
-| classified | classification ∈ {missing_knowledge, missing_query, missing_constraint, missing_test, missing_evaluator, bad_workflow, bad_model} |
+| classified | classification ∈ {missing_knowledge, missing_query, missing_constraint, missing_test, missing_evaluator, bad_workflow, bad_model}（実装部品指向） ∪ {incorrect_knowledge, missing_relation, missing_condition, missing_decision_model, missing_capability, wrong_architecture}（知性構造指向・CONCEPTv2 §9）。任意で refs[]（診断の参照先: StatementID・evaluator:等の型付き参照） |
 | upgrade_proposed | proposal（提案内容 or ファイルref） |
 | implemented | assets[]（最低1件の golden_task と、最低1件の evaluator/rule/query/detector）, regression_ref |
 | accepted_risk | reason, why_undetected（investigated済みで記録があれば省略可） |
@@ -312,7 +360,26 @@ budgets:
 strict_vocabulary: false
 stale_after_days: 7
 regression_every_days: 7   # この間隔を超えてregression未実行だと主要コマンドがヒントを出す
+gap_confidence_floor: 0.7  # gap分析でこれ未満のconfidenceをUNCERTAINに分類する
 ```
+
+## Intelligence Gap Analysis（`autopoiesys gap`）
+
+goalノードから requires / depends_on 辺で到達するRequired Intelligenceを現在のOSと突合し、
+優先順位つき決定表で分類する（保存せず毎回再計算。CONCEPTv2 §6）:
+
+| 順 | 分類 | 判定 |
+|---|---|---|
+| 1 | CONFLICTING | contradicts辺が接続、または支持と反証のリンクが併存 |
+| 2 | MISSING | capability/decisionに束縛辺が無い、または束縛先が全台帳に不在 |
+| 3 | STALE | 束縛先がsupersede/retract済み、または最新の支持証拠がstale_after_days超過 |
+| 4 | UNVERIFIED | llm由来で証拠ゼロの知識、または束縛evaluatorのverdict記録ゼロ |
+| 5 | UNCERTAIN | status=hypothesis（束縛型のcapability/decisionは除く — 可用性は束縛と検証実績で測る）、または confidence < gap_confidence_floor |
+| 6 | AVAILABLE | 上記いずれにも該当しない |
+
+goal.yamlのsuccess_criteria/constraints（evaluator接地）も同じ語彙で分類に統合される。
+`--assert` はMISSINGを `type: unknown`（tags: [gap]、内容ハッシュ由来idで冪等）として起票する。
+`--criteria-only` はgoalノード未整備でもgoal.yamlの接地だけを検査する。
 
 ## Token Ledger（observations/costs.jsonl の1行）
 

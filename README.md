@@ -61,6 +61,7 @@ Claude Codeでこのディレクトリを開き、`/init-os` と打つ。
 | コマンド | 何が起きるか |
 |---|---|
 | `/init-os` | 環境診断 → 目的と運用のヒアリング → 目的定義（承認制） |
+| `/decompose-goal` | 目的から必要な知性（能力・判断・知識・評価）を導出し、何が有り何が無いかを分類 |
 | `/discover-domain` | 対象領域を調査し、知識を構造化して蓄積 |
 | `/build-query-system` | 知識の取得窓口（Query）を生成 |
 | `/build-evaluation-model` | 「完了」の判定器（評価器）を生成 |

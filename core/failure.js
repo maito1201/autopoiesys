@@ -7,8 +7,16 @@ const { readJsonl, appendJsonl, nowIso, nextId, fingerprint } = require('./util'
 const STATES = ['reported', 'investigated', 'classified', 'upgrade_proposed', 'implemented', 'accepted_risk'];
 const TERMINAL = ['implemented', 'accepted_risk'];
 const CLASSIFICATIONS = [
+  // v1（実装部品指向）: OSのどの部品ファイルが欠けたか
   'missing_knowledge', 'missing_query', 'missing_constraint', 'missing_test',
   'missing_evaluator', 'bad_workflow', 'bad_model',
+  // v2（知性構造指向, CONCEPTv2 §9）: どの知性の層が欠けたか
+  'incorrect_knowledge',     // 知識は存在するが内容が誤り（missing_knowledgeと区別）
+  'missing_relation',        // 両端の知識はあるが関係が未表現だった
+  'missing_condition',       // 知識・判断の適用条件が未表現だった
+  'missing_decision_model',  // 知識はあるが判断に変換するルールが無かった
+  'missing_capability',      // 必要な能力自体が未導出だった
+  'wrong_architecture',      // 個別部品でなくOSの知的構造そのものの誤り
 ];
 const LEGAL_TRANSITIONS = {
   reported: ['investigated', 'accepted_risk'],
@@ -67,6 +75,10 @@ function transition(osDir, id, to, fields = {}) {
   } else if (to === 'classified') {
     if (!CLASSIFICATIONS.includes(fields.classification)) {
       errors.push(`classificationは ${CLASSIFICATIONS.join('|')}`);
+    }
+    // 診断の参照先（どのstatement/evaluator/relationが問題か）。散文への埋没を防ぐ
+    if (fields.refs !== undefined && (!Array.isArray(fields.refs) || fields.refs.some((r) => typeof r !== 'string'))) {
+      errors.push('refsは文字列の配列（例: ["S0004", "evaluator:tests_pass"]）');
     }
   } else if (to === 'upgrade_proposed') {
     if (!fields.proposal) errors.push('proposal必須（提案内容またはファイルref）');

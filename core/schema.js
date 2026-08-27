@@ -10,7 +10,7 @@ const { discoverKnowledgeSources } = require('./ingest');
 const { listEvaluators, loadEvaluatorDef, loadTasks } = require('./evaluate');
 const failure = require('./failure');
 
-const FORMAT_VERSION = '0.1.0';
+const FORMAT_VERSION = '0.2.0'; // 0.2: Intelligence Graph（relationship第一級化・capability型・traverse・gap）— 追加的変更のみ
 
 function readYamlFile(file) {
   if (!fs.existsSync(file)) return null;

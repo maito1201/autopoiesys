@@ -8,10 +8,51 @@ const { parseYaml } = require('./yaml');
 const STATEMENT_TYPES = [
   'entity', 'relationship', 'observation', 'claim', 'evidence', 'hypothesis',
   'unknown', 'decision', 'constraint', 'goal', 'outcome', 'failure',
+  'capability', // Goal分解（CONCEPTv2 §5）の受け皿。Gap分析の分類単位
 ];
 const STATUSES = ['fact', 'hypothesis', 'unknown', 'retracted'];
 const LINK_ROLES = ['supports', 'counters', 'about', 'derived_from', 'relates_to', 'caused_by', 'prevents'];
 const PROVENANCE_METHODS = ['deterministic', 'llm', 'human'];
+
+// snapshotの論理スキーマ版。索引の形が変わったらインクリメントする —
+// これが無いとコア更新後も旧snapshotがchecksum一致で有効判定され、新索引が空のまま沈黙する。
+const SNAPSHOT_SCHEMA_VERSION = 2;
+
+// World Model外の正本台帳への型付き参照（relationshipの端点に使える）。
+// 台帳の実体をノードとして複製せず、参照の実在だけをコアが検証する。
+const ASSET_REF_RE = /^(evaluator|query|golden_task|task|failure|skill):([A-Za-z0-9][A-Za-z0-9_-]*)$/;
+
+function isAssetRef(id) {
+  return ASSET_REF_RE.test(String(id));
+}
+
+// osDirに対するasset refの実在検証器を作る（台帳の読込は1回だけ）
+function makeAssetChecker(osDir) {
+  let taskIds = null;
+  let failureIds = null;
+  return (ref) => {
+    const m = ASSET_REF_RE.exec(String(ref));
+    if (!m) return false;
+    const [, kind, name] = m;
+    if (kind === 'evaluator') return fs.existsSync(path.join(osDir, 'evaluators', `${name}.yaml`));
+    if (kind === 'query') return fs.existsSync(path.join(osDir, 'queries', `${name}.yaml`));
+    if (kind === 'golden_task') return fs.existsSync(path.join(osDir, 'golden_tasks', `${name}.yaml`));
+    if (kind === 'task') {
+      if (!taskIds) taskIds = new Set(readJsonl(path.join(osDir, 'tasks', 'tasks.jsonl')).map((t) => t.id));
+      return taskIds.has(name);
+    }
+    if (kind === 'failure') {
+      if (!failureIds) failureIds = new Set(readJsonl(path.join(osDir, 'failures', 'ledger.jsonl')).map((f) => f.id));
+      return failureIds.has(name);
+    }
+    if (kind === 'skill') {
+      const ws = path.dirname(osDir);
+      return fs.existsSync(path.join(ws, '.claude', 'skills', name, 'SKILL.md'))
+        || fs.existsSync(path.join(ws, 'skills', name, 'SKILL.md'));
+    }
+    return false;
+  };
+}
 
 function eventsFile(osDir) {
   return path.join(osDir, 'world_model', 'events.jsonl');
@@ -49,7 +90,7 @@ function usedVocabulary(events) {
 
 // 1件のStatementを検証する。knownIds には既存+同一バッチのIDを渡す。
 // used（使用実績のある語彙）を渡すと、非strict時は初出の語彙のみ警告する。
-function validateStatement(st, { knownIds, vocab, used, strict }) {
+function validateStatement(st, { knownIds, vocab, used, strict, assetCheck }) {
   const errors = [];
   const warnings = [];
   const label = st && st.id ? st.id : '(no id)';
@@ -104,6 +145,28 @@ function validateStatement(st, { knownIds, vocab, used, strict }) {
       }
     }
   }
+  for (const f of ['conditions', 'exceptions']) {
+    if (st[f] !== undefined && (!Array.isArray(st[f]) || st[f].some((c) => typeof c !== 'string'))) {
+      errors.push(`${label}: ${f}は文字列の配列`);
+    }
+  }
+  // relationship = 第一級Relation（CONCEPTv2 §4）。端点の実在を強制する —
+  // LLMは辺を提案できるが、捏造された束縛は書き込めない。
+  if (st.type === 'relationship') {
+    for (const f of ['subject', 'predicate', 'object']) {
+      if (!st[f]) errors.push(`${label}: relationshipは${f}が必須`);
+    }
+    for (const f of ['subject', 'object']) {
+      const v = st[f];
+      if (!v) continue;
+      if (knownIds && knownIds.has(v)) continue;
+      if (isAssetRef(v)) {
+        if (assetCheck && !assetCheck(v)) errors.push(`${label}: ${f}の参照先が実在しない: ${v}`);
+        continue;
+      }
+      if (knownIds) errors.push(`${label}: ${f}が存在しない: ${v}（StatementIDまたは evaluator:|query:|golden_task:|task:|failure:|skill: の型付き参照）`);
+    }
+  }
   if (st.predicate && vocab && !vocab.predicates.includes(st.predicate)) {
     if (strict) {
       errors.push(`${label}: 未登録のpredicate: ${st.predicate}（strict_vocabulary有効。vocabulary.yamlに登録が必要）`);
@@ -152,8 +215,9 @@ function assertStatements(osDir, statements, { strict = false } = {}) {
     accepted.push(st);
   }
   const used = usedVocabulary(existing);
+  const assetCheck = makeAssetChecker(osDir);
   for (const st of accepted) {
-    const { errors, warnings } = validateStatement(st, { knownIds: batchIds, vocab, used, strict });
+    const { errors, warnings } = validateStatement(st, { knownIds: batchIds, vocab, used, strict, assetCheck });
     allErrors.push(...errors);
     allWarnings.push(...warnings);
     // 同一バッチ内の再利用は警告しない（初出の1回だけ）
@@ -198,7 +262,11 @@ function recordStatement(osDir, fields) {
     status,
     tags: fields.tags !== undefined ? fields.tags : base.tags,
     scope: fields.scope !== undefined ? fields.scope : base.scope,
+    subject: fields.subject,
     predicate: fields.predicate || base.predicate,
+    object: fields.object,
+    conditions: fields.conditions,
+    exceptions: fields.exceptions,
     confidence: fields.confidence,
     links: fields.links,
     supersedes: fields.supersedes,
@@ -226,6 +294,14 @@ function buildSnapshot(events) {
     if (st.status === 'retracted') continue;
     current[st.id] = st;
   }
+  // 統合辺ビュー: relationship（第一級・属性つき）と links[]（軽量配管）を
+  // 単一の辺集合に統合し、traverse（多段走査）の基盤にする。
+  const edgesOut = {};
+  const edgesIn = {};
+  const addEdge = (edge) => {
+    (edgesOut[edge.from] = edgesOut[edge.from] || []).push(edge);
+    (edgesIn[edge.to] = edgesIn[edge.to] || []).push(edge);
+  };
   for (const id of Object.keys(current).sort()) {
     const st = current[id];
     (byType[st.type] = byType[st.type] || []).push(id);
@@ -233,12 +309,18 @@ function buildSnapshot(events) {
     for (const sc of st.scope || []) (byScope[sc] = byScope[sc] || []).push(id);
     for (const l of st.links || []) {
       (linksIn[l.to] = linksIn[l.to] || []).push({ from: id, role: l.role });
+      addEdge({ from: id, to: l.to, kind: l.role, via: id });
+    }
+    if (st.type === 'relationship' && st.subject && st.object) {
+      const edge = { from: st.subject, to: st.object, kind: st.predicate, via: id, status: st.status };
+      if (st.confidence !== undefined) edge.confidence = st.confidence;
+      addEdge(edge);
     }
   }
   return {
-    meta: { event_count: events.length },
+    meta: { event_count: events.length, schema_version: SNAPSHOT_SCHEMA_VERSION },
     statements: current,
-    indexes: { by_type: byType, by_tag: byTag, by_scope: byScope, links_in: linksIn },
+    indexes: { by_type: byType, by_tag: byTag, by_scope: byScope, links_in: linksIn, edges_out: edgesOut, edges_in: edgesIn },
   };
 }
 
@@ -259,7 +341,9 @@ function getSnapshot(osDir) {
   if (fs.existsSync(file)) {
     try {
       const snap = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (snap.meta && snap.meta.source_checksum === checksum) return snap;
+      // checksum一致でもスキーマ版が古ければ再生成する（コア更新後の索引欠落による沈黙バグ防止）
+      if (snap.meta && snap.meta.source_checksum === checksum
+          && snap.meta.schema_version === SNAPSHOT_SCHEMA_VERSION) return snap;
     } catch {
       // 壊れたsnapshotは再生成する
     }
@@ -328,13 +412,14 @@ function lintWorldModel(osDir, { strict = false } = {}) {
   const errors = [];
   const warnings = [];
   const seen = new Set();
+  const assetCheck = makeAssetChecker(osDir);
   for (const st of events) {
     if (seen.has(st.id)) {
       // 同一idの再出現は現状スキーマでは想定しない（statusの更新はsupersedesで表現）
       warnings.push(`${st.id}: idが重複している（後の行が優先されない点に注意）`);
     }
     seen.add(st.id);
-    const { errors: e, warnings: w } = validateStatement(st, { knownIds: ids, vocab, used, strict });
+    const { errors: e, warnings: w } = validateStatement(st, { knownIds: ids, vocab, used, strict, assetCheck });
     errors.push(...e);
     warnings.push(...w);
   }
@@ -369,6 +454,9 @@ module.exports = {
   STATEMENT_TYPES,
   STATUSES,
   LINK_ROLES,
+  SNAPSHOT_SCHEMA_VERSION,
+  isAssetRef,
+  makeAssetChecker,
   eventsFile,
   loadEvents,
   loadVocabulary,

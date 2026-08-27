@@ -15,6 +15,7 @@ const metrics = require('../core/metrics');
 const ingest = require('../core/ingest');
 const scaffold = require('../core/scaffold');
 const knowledge = require('../core/knowledge');
+const gap = require('../core/gap');
 
 function parseArgs(argv) {
   const positional = [];
@@ -184,6 +185,58 @@ const COMMANDS = {
       task: args.flags.task ? String(args.flags.task) : undefined,
     });
     out(r, args.flags);
+    return 0;
+  },
+
+  // 第一級Relationの起票（type:relationship Statementの糖衣。CONCEPTv2 §4）
+  relate(args) {
+    const osDir = requireOsDir(args.flags);
+    const [subject, predicate, object] = args.positional;
+    const body = args.positional.slice(3).join(' ');
+    if (!subject || !predicate || !object || !body) {
+      throw new Error(
+        '使い方: autopoiesys relate <subject> <predicate> <object> "<説明>" --source s\n' +
+        '  [--confidence 0.x] [--status fact|hypothesis] [--conditions a,b] [--exceptions a,b] [--task T001]\n' +
+        '  端点はStatementIDまたは evaluator:|query:|golden_task:|task:|failure:|skill: の型付き参照'
+      );
+    }
+    if (!args.flags.source) throw new Error('--source が必要（この関係を何で裏取りしたか）');
+    const r = store.recordStatement(osDir, {
+      type: 'relationship',
+      body,
+      subject: String(subject),
+      predicate: String(predicate),
+      object: String(object),
+      status: args.flags.status ? String(args.flags.status) : undefined,
+      confidence: args.flags.confidence !== undefined ? Number(args.flags.confidence) : undefined,
+      conditions: args.flags.conditions ? String(args.flags.conditions).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
+      exceptions: args.flags.exceptions ? String(args.flags.exceptions).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
+      source: String(args.flags.source),
+      method: args.flags.method ? String(args.flags.method) : undefined,
+      task: args.flags.task ? String(args.flags.task) : undefined,
+    });
+    out(r, args.flags);
+    return 0;
+  },
+
+  // Intelligence Gap Analysis（CONCEPTv2 §6）。保存せず毎回再計算する
+  gap(args) {
+    const osDir = requireOsDir(args.flags);
+    const cfg = schema.loadConfig(osDir);
+    const analysis = gap.gapAnalysis(osDir, {
+      goalId: args.flags.goal ? String(args.flags.goal) : undefined,
+      floor: args.flags.floor !== undefined ? Number(args.flags.floor)
+        : (cfg.gap_confidence_floor !== undefined ? Number(cfg.gap_confidence_floor) : undefined),
+      staleAfterDays: cfg.stale_after_days || 7,
+      now: args.flags.now,
+      criteriaOnly: !!args.flags['criteria-only'],
+    });
+    out(analysis, args.flags);
+    if (args.flags.assert) {
+      const r = gap.assertMissingAsUnknowns(osDir, analysis);
+      process.stdout.write(`\nMISSINGをUnknownとして起票: 追加${r.added.length}件 / 既存${r.skipped.length}件\n`);
+    }
+    printHints(osDir);
     return 0;
   },
 
@@ -606,6 +659,7 @@ const COMMANDS = {
 World Model:    assert --file s.json / statement add|supersede|show / query [name] [--param k=v]
                 ingest repo|rules|memory|knowledge|all [--scope S] [--repo D] [--check]
 知識源と到達性:  sources scan [--emit] / audit reachability
+Intelligence Graph: relate <s> <p> <o> "<説明>" / gap [--goal S00xx] [--assert] [--criteria-only]
 タスクと評価:   task new [--repos <scope>[=<dir>],...] |list|show|note|artifact
                 evaluate --task T / verdict --file v.json / next-action T
 Failureループ:  feedback "..." / failure list|show|transition|lint / regression

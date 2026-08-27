@@ -45,6 +45,7 @@ budgets:
 strict_vocabulary: false
 stale_after_days: 7
 regression_every_days: 7
+gap_confidence_floor: 0.7
 `;
 
 const GOAL_TEMPLATE = `# init-os Skillのヒアリングで生成する。手で書く場合はSCHEMA.md参照。
@@ -84,6 +85,12 @@ const VOCABULARY_TEMPLATE = `# predicate / tag の登録簿。未登録は警告
 predicates:
   - affects
   - depends_on
+  # Intelligence Graphの最小集合（各語に決定的な消費者がいる — 残りは需要駆動で追加）
+  - requires        # Goal分解の骨格辺（gapが辿る）
+  - causes          # Failure診断・因果
+  - contradicts     # gapのCONFLICTING判定の入力
+  - evaluated_by    # 知性→評価器の束縛（gapのMISSING/UNVERIFIED判定）
+  - measured_by     # 知性→メトリクスの束縛
 tags:
   - repo
   - inventory
