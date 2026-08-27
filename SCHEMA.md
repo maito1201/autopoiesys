@@ -162,7 +162,7 @@ checks:
   - kind: query_matches        # Queryの返却枠に実際にその知識が入るかを内容で検査する。
     query: get_repo_playbook   # 件数だけでは max_tokens の切詰めで重要な1件が落ちても気づけない
     params: { scope: service-api }
-    pattern: "go build"
+    pattern: "npm install"
 ```
 
 `query_*` は `query`（必須）と `params`（任意）を取り、`query_matches` /

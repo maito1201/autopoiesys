@@ -53,7 +53,7 @@ test('ingest rules: 見出し単位でplaybook化し、長い節は全文パス�
   const long = 'x'.repeat(300);
   const repo = repoWith(root, 'repo-a', {
     'CLAUDE.md': [
-      '# タイトル', '前文', '', '## 禁止事項', 'go build は禁止', '', '## 章だけ', '', '### 長い節', long, '',
+      '# タイトル', '前文', '', '## 禁止事項', 'npm install は禁止', '', '## 章だけ', '', '### 長い節', long, '',
     ].join('\n'),
   });
   const r = ingestRuleDocs(osDir, { scope: 'repo-a', repoRoot: repo, docs: ['CLAUDE.md'], maxSectionChars: 100 });
@@ -62,18 +62,18 @@ test('ingest rules: 見出し単位でplaybook化し、長い節は全文パス�
   assert.strictEqual(rules.length, 3);
   assert.ok(rules.every((s) => s.type === 'constraint' && s.status === 'fact'));
   assert.ok(rules.every((s) => s.scope[0] === 'repo-a'));
-  const ban = rules.find((s) => s.body.includes('go build'));
+  const ban = rules.find((s) => s.body.includes('npm install'));
   assert.match(ban.body, /CLAUDE\.md「禁止事項」/);
   const truncated = rules.find((s) => s.body.includes('…'));
   assert.match(truncated.body, /全文: .*CLAUDE\.md の「長い節」節/);
   assert.deepStrictEqual(r.missing_docs, []);
   // 再取込は冪等、節の内容が変わったらsupersede
   assert.deepStrictEqual(ingestRuleDocs(osDir, { scope: 'repo-a', repoRoot: repo, docs: ['CLAUDE.md'], maxSectionChars: 100 }).added, []);
-  write(repo, 'CLAUDE.md', ['# タイトル', '前文', '', '## 禁止事項', 'go vet も禁止', ''].join('\n'));
+  write(repo, 'CLAUDE.md', ['# タイトル', '前文', '', '## 禁止事項', 'グローバルインストールも禁止', ''].join('\n'));
   ingestRuleDocs(osDir, { scope: 'repo-a', repoRoot: repo, docs: ['CLAUDE.md'], maxSectionChars: 100 });
   const after = liveByTag(osDir, 'playbook').filter((s) => s.body.includes('禁止事項'));
   assert.strictEqual(after.length, 1);
-  assert.match(after[0].body, /go vet/);
+  assert.match(after[0].body, /グローバルインストール/);
 });
 
 test('ingest rules: 存在しないdocはmissingとして申告する（黙って0件にしない）', () => {
@@ -88,7 +88,7 @@ test('ingest memory: descriptionを索引化し、typeで status/type/tags を�
   const { root, osDir } = makeOs();
   const dir = path.join(root, 'mem');
   write(dir, 'MEMORY.md', '- 索引本体は取込対象外');
-  write(dir, 'f.md', ['---', 'name: f_rule', 'description: make fmt は禁止', 'metadata:', '  type: feedback', '---', '', '本文'].join('\n'));
+  write(dir, 'f.md', ['---', 'name: f_rule', 'description: prettier の一括整形は禁止', 'metadata:', '  type: feedback', '---', '', '本文'].join('\n'));
   write(dir, 'p.md', ['---', 'name: p_log', 'description: issue 1 はPR 2でマージ済み', 'metadata:', '  type: project', '---', '', '本文'].join('\n'));
   write(dir, 'n.md', ['---', 'name: no_desc', 'metadata:', '  type: feedback', '---', '', '本文'].join('\n'));
   const r = ingestMemoryIndex(osDir, { scope: 'repo-a', dir });
@@ -96,7 +96,7 @@ test('ingest memory: descriptionを索引化し、typeで status/type/tags を�
   assert.deepStrictEqual(r.skipped_files, ['n.md']); // descriptionが無いものは取込対象外として申告
   const mems = liveByTag(osDir, 'memory');
   assert.strictEqual(mems.length, 2);
-  const fb = mems.find((s) => s.body.includes('make fmt'));
+  const fb = mems.find((s) => s.body.includes('prettier'));
   assert.strictEqual(fb.type, 'constraint');
   assert.strictEqual(fb.status, 'fact');
   assert.deepStrictEqual(fb.tags, ['playbook', 'memory', 'feedback']);
@@ -108,11 +108,11 @@ test('ingest memory: descriptionを索引化し、typeで status/type/tags を�
   assert.ok(!pj.tags.includes('playbook')); // 進行中の結論は作法ではない
   // 冪等 / descriptionが変わったらsupersede
   assert.deepStrictEqual(ingestMemoryIndex(osDir, { scope: 'repo-a', dir }).added, []);
-  write(dir, 'f.md', ['---', 'name: f_rule', 'description: make fmt は禁止（gofmtを使う）', 'metadata:', '  type: feedback', '---'].join('\n'));
+  write(dir, 'f.md', ['---', 'name: f_rule', 'description: prettier の一括整形は禁止（変更ファイルのみ整形する）', 'metadata:', '  type: feedback', '---'].join('\n'));
   ingestMemoryIndex(osDir, { scope: 'repo-a', dir });
-  const fbs = liveByTag(osDir, 'memory').filter((s) => s.body.includes('make fmt'));
+  const fbs = liveByTag(osDir, 'memory').filter((s) => s.body.includes('prettier'));
   assert.strictEqual(fbs.length, 1);
-  assert.match(fbs[0].body, /gofmt/);
+  assert.match(fbs[0].body, /変更ファイルのみ/);
 });
 
 test('ingest memory: 同じメモリ名でもscopeが違えば別Statementとして併存する', () => {
@@ -215,9 +215,9 @@ test('backfillScope: fallbackScope未指定ならingest観測も据え置き', (
 
 test('dryRun: 追記せず「追記されるはずだったもの」を返す（同期状態の検査用）', () => {
   const { root, osDir } = makeOs();
-  const repo = repoWith(root, 'repo-a', { 'CLAUDE.md': ['# T', '前文', '', '## 規約', 'go build 禁止'].join('\n') });
+  const repo = repoWith(root, 'repo-a', { 'CLAUDE.md': ['# T', '前文', '', '## 規約', 'npm install 禁止'].join('\n') });
   const dir = path.join(root, 'mem');
-  write(dir, 'f.md', ['---', 'name: f', 'description: make fmt は禁止', 'metadata:', '  type: feedback', '---'].join('\n'));
+  write(dir, 'f.md', ['---', 'name: f', 'description: prettier の一括整形は禁止', 'metadata:', '  type: feedback', '---'].join('\n'));
 
   const dryRules = ingestRuleDocs(osDir, { scope: 'repo-a', repoRoot: repo, docs: ['CLAUDE.md'], dryRun: true });
   const dryMem = ingestMemoryIndex(osDir, { scope: 'repo-a', dir, dryRun: true });
@@ -233,6 +233,6 @@ test('dryRun: 追記せず「追記されるはずだったもの」を返す（
   assert.deepStrictEqual(ingestMemoryIndex(osDir, { scope: 'repo-a', dir, dryRun: true }).would_add, []);
 
   // 知識源が更新されたら再び would_add が立つ（更新漏れの検出）
-  write(dir, 'f.md', ['---', 'name: f', 'description: make fmt は禁止（gofmtを使う）', 'metadata:', '  type: feedback', '---'].join('\n'));
+  write(dir, 'f.md', ['---', 'name: f', 'description: prettier の一括整形は禁止（変更ファイルのみ整形する）', 'metadata:', '  type: feedback', '---'].join('\n'));
   assert.strictEqual(ingestMemoryIndex(osDir, { scope: 'repo-a', dir, dryRun: true }).would_add.length, 1);
 });

@@ -81,8 +81,8 @@ test('登録済みタスクのdirが失われていたら誤ったPASSを出さ�
 test('query_matches: Queryの返却枠に知識が入っているかを内容で検査する', () => {
   const { osDir } = makeOs();
   store.assertStatements(osDir, [
-    statement('S0001', 'constraint', 'go build は禁止', { tags: ['playbook'], scope: ['api'] }),
-    statement('S0002', 'constraint', 'EASでビルドする', { tags: ['playbook'], scope: ['app'] }),
+    statement('S0001', 'constraint', 'npm install は禁止（pnpmを使う）', { tags: ['playbook'], scope: ['api'] }),
+    statement('S0002', 'constraint', 'ビルドはCIに任せる', { tags: ['playbook'], scope: ['app'] }),
   ]);
   write(osDir, 'queries/playbook.yaml', [
     'name: playbook',
@@ -105,7 +105,7 @@ test('query_matches: Queryの返却枠に知識が入っているかを内容で
     '  - kind: query_matches',
     '    query: playbook',
     '    params: { scope: api }',
-    '    pattern: "go build"',
+    '    pattern: "npm install"',
   ].join('\n'));
   const def = evaluate.loadEvaluatorDef(osDir, 'reach');
   assert.strictEqual(evaluate.runDeterministic(osDir, def, { workDir: osDir }).verdict, 'PASS');
