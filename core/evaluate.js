@@ -331,10 +331,15 @@ function getTask(osDir, id) {
   return t;
 }
 
-function newTask(osDir, objective, evaluators) {
+// extra: 引き継ぎに必要な作業文脈（work_dir=評価・作業対象ディレクトリ, refs=Issue/PR等のURL列, context=自由記述）。
+// タスクは会話ではなくOSが継続性の正本になる: 別プロセスがresumeしても task show だけで再開できる状態を保つ。
+function newTask(osDir, objective, evaluators, extra = {}) {
   const byId = loadTasks(osDir);
   const id = nextId('T', Object.keys(byId), 3);
   const entry = { id, ts: nowIso(), objective, status: 'open', artifacts: [], evaluators: evaluators || [] };
+  if (extra.work_dir) entry.work_dir = extra.work_dir;
+  if (extra.refs && extra.refs.length) entry.refs = extra.refs;
+  if (extra.context) entry.context = extra.context;
   appendJsonl(tasksFile(osDir), entry);
   return entry;
 }
@@ -344,6 +349,15 @@ function updateTask(osDir, id, patch) {
   const entry = { ...t, ...patch, id, ts: nowIso() };
   appendJsonl(tasksFile(osDir), entry);
   return entry;
+}
+
+// チェックポイント追記。中間状態（検証済み事実・現在のステップ・次アクション）を
+// 会話文脈でなくタスク台帳に残し、プロセスを跨いだ引き継ぎを可能にする。
+function addTaskNote(osDir, id, note) {
+  if (!note) throw new Error('noteが必要');
+  const t = getTask(osDir, id);
+  const notes = [...(t.notes || []), { ts: nowIso(), note }];
+  return updateTask(osDir, id, { notes });
 }
 
 // タスクの全Evaluatorを実行。det/commandは即verdict追記、llm_judgeはbriefing生成のみ。
@@ -392,9 +406,11 @@ function evaluateTask(osDir, taskId, { only, workDir, replay } = {}) {
       }
       continue;
     }
+    // work-dir未指定時はタスク登録時のwork_dirを使う（worktree運用で誤って本体を評価する事故を防ぐ）
+    const effectiveWorkDir = workDir || task.work_dir || process.cwd();
     const r = def.method === 'deterministic'
-      ? runDeterministic(osDir, def, { workDir: workDir || process.cwd() })
-      : runCommand(def, { workDir: workDir || process.cwd() });
+      ? runDeterministic(osDir, def, { workDir: effectiveWorkDir })
+      : runCommand(def, { workDir: effectiveWorkDir });
     const entry = recordVerdict(osDir, {
       task: taskId,
       evaluator: evId,
@@ -494,6 +510,7 @@ module.exports = {
   getTask,
   newTask,
   updateTask,
+  addTaskNote,
   evaluateTask,
   latestVerdicts,
   nextAction,

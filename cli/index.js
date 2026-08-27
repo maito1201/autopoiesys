@@ -216,11 +216,22 @@ const COMMANDS = {
     const sub = args.positional[0];
     if (sub === 'new') {
       const objective = args.positional.slice(1).join(' ');
-      if (!objective) throw new Error('使い方: autopoiesys task new "<objective>" --evaluators a,b');
+      if (!objective) throw new Error('使い方: autopoiesys task new "<objective>" --evaluators a,b [--work-dir D] [--refs url1,url2] [--context "..."]');
       const evaluators = args.flags.evaluators ? String(args.flags.evaluators).split(',').map((s) => s.trim()).filter(Boolean) : [];
-      const t = evaluate.newTask(osDir, objective, evaluators);
+      const t = evaluate.newTask(osDir, objective, evaluators, {
+        work_dir: args.flags['work-dir'] ? path.resolve(String(args.flags['work-dir'])) : undefined,
+        refs: args.flags.refs ? String(args.flags.refs).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
+        context: args.flags.context ? String(args.flags.context) : undefined,
+      });
       out(t, args.flags);
       printHints(osDir);
+      return 0;
+    }
+    if (sub === 'note') {
+      const id = args.positional[1];
+      const note = args.positional.slice(2).join(' ');
+      if (!id || !note) throw new Error('使い方: autopoiesys task note <id> "<チェックポイント>"');
+      out(evaluate.addTaskNote(osDir, id, note), args.flags);
       return 0;
     }
     if (sub === 'list') {
@@ -245,7 +256,7 @@ const COMMANDS = {
       out(evaluate.updateTask(osDir, id, { evaluators }), args.flags);
       return 0;
     }
-    throw new Error('使い方: autopoiesys task new|list|show|artifact|set-evaluators');
+    throw new Error('使い方: autopoiesys task new|list|show|note|artifact|set-evaluators');
   },
 
   evaluate(args) {
@@ -433,7 +444,7 @@ const COMMANDS = {
 環境・初期化:   doctor / init [--dir D] [--force] / version / migrate
 検証:           validate / check / rebuild
 World Model:    assert --file s.json / statement add|supersede|show / ingest repo [--repo D] / query [name] [--param k=v]
-タスクと評価:   task new|list|show|artifact / evaluate --task T / verdict --file v.json / next-action T
+タスクと評価:   task new|list|show|note|artifact / evaluate --task T / verdict --file v.json / next-action T
 Failureループ:  feedback "..." / failure list|show|transition|lint / regression
 Token Economics: ledger add / research open|close|list / compile --file f.json / metrics
 

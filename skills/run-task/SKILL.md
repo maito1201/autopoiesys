@@ -11,9 +11,15 @@ Task → Code → Done ではなく、Objective → Plan → Execute → Evaluat
 ## 手順
 
 1. タスクを登録する。適用するEvaluatorをこの時点で決める
-   （goal.yamlの関連するsuccess_criteria / constraintsのevaluatorを含めること）:
+   （goal.yamlの関連するsuccess_criteria / constraintsのevaluatorを含めること）。
+   作業対象ディレクトリ（worktree等）と参照（Issue/PR URL）も登録する —
+   **継続性の正本は会話ではなくタスク台帳**であり、別プロセスがresumeしても
+   `task show` だけで再開できる状態を保つ:
 
-       node cli/index.js task new "<objective>" --evaluators <e1>,<e2>
+       node cli/index.js task new "<objective>" --evaluators <e1>,<e2> --work-dir <対象dir> --refs <issue-url>
+
+   `--work-dir` は command/deterministic evaluatorの実行ディレクトリの既定値になる
+   （`evaluate --work-dir` は上書き用）。
 
 2. **文脈はQuery経由でのみ取得する**（T0）。World Model全体・events.jsonlの生読みは禁止。
    Query名はOSごとに異なるため、まず実在するQueryを列挙してから選ぶ:
@@ -31,6 +37,11 @@ Task → Code → Done ではなく、Objective → Plan → Execute → Evaluat
 
        node cli/index.js task artifact <id> --path <p> --note "<説明>"
 
+   フェーズ境界（調査完了・実装完了・検証完了）や重大な発見のたびに
+   チェックポイントを台帳へ残す（コンパクション・プロセス交代への備え）:
+
+       node cli/index.js task note <id> "<検証済みの事実・現在のステップ・次アクション>"
+
 4. **学習をその場で還流する**（タスク終了・失敗を待たない）。
    実行中に次のいずれかに出会ったら、発見した時点でWorld Modelへ書き戻す:
 
@@ -43,8 +54,12 @@ Task → Code → Done ではなく、Objective → Plan → Execute → Evaluat
 
    裏取りできていないものは status=hypothesis（--confidence必須）で書くか、書かない。
 
-5. 独立評価を要求する:
+5. **完了報告のドラフトを書いてartifact登録してから**、独立評価を要求する。
+   完了報告（実行した検証コマンドと結果・要件との対応・未実施事項）を評価対象とする
+   evaluatorは、報告がOSに存在しないと判定不能（UNCERTAIN）になりループが止まる:
 
+       # 例: .os/tasks/<id>-report.md に報告を書き、
+       node cli/index.js task artifact <id> --path .os/tasks/<id>-report.md --note "完了報告"
        node cli/index.js evaluate --task <id>
 
    - deterministic / command は即時にverdictが記録される

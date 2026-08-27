@@ -195,11 +195,16 @@ Next Action Engine が COLLECT_EVIDENCE / DEEP_RESEARCH / RESOLVE_CONFLICT へ�
 
 ```json
 {"id":"T001","ts":"...","objective":"...","status":"open",
- "artifacts":[{"path":"...","note":"..."}],"evaluators":["tests_pass"]}
+ "artifacts":[{"path":"...","note":"..."}],"evaluators":["tests_pass"],
+ "work_dir":"/abs/path/to/worktree","refs":["https://github.com/o/r/issues/1"],
+ "context":"...","notes":[{"ts":"...","note":"調査完了: 30分失効をコードで確認"}]}
 ```
 
 `status` は追記で更新（同idの最新行が現在状態）。
 `evaluators`: このタスクに適用するEvaluator ID列。
+`work_dir`（任意）: command/deterministic evaluator実行ディレクトリの既定値（`evaluate --work-dir` が上書き）。
+`refs` / `context`（任意）: Issue/PR URL等の参照と自由記述の作業文脈。
+`notes`（任意）: `task note` によるチェックポイント列。継続性の正本を会話でなく台帳に置くためのもの。
 
 ## Failure（failures/ledger.jsonl の1行 = 状態遷移イベント）
 

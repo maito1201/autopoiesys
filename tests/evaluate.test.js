@@ -117,3 +117,35 @@ test('next-action: §11の写像（UNCERTAIN/insufficient/model_limitation/missi
   assert.strictEqual(evaluate.nextAction(osDir, t.id).action, 'DONE');
   assert.strictEqual(evaluate.getTask(osDir, t.id).status, 'done');
 });
+
+test('task: work_dir/refs/notesの引き継ぎ文脈と、evaluateのwork_dirフォールバック', () => {
+  const { root, osDir } = makeOs();
+  write(root, 'wt/ok.js', 'process.exit(0);\n');
+  write(osDir, 'evaluators/run_ok.yaml', [
+    'id: run_ok',
+    'applies_to: repo_change',
+    'tier: T0',
+    'method: command',
+    'argv: [node, ok.js]',
+    'expect_exit: 0',
+  ].join('\n'));
+  const t = evaluate.newTask(osDir, '引き継ぎ', ['run_ok'], {
+    work_dir: `${root}/wt`,
+    refs: ['https://example.com/issues/1'],
+    context: 'worktreeで作業',
+  });
+  assert.strictEqual(t.work_dir, `${root}/wt`);
+  assert.deepStrictEqual(t.refs, ['https://example.com/issues/1']);
+  // work-dir未指定でも task.work_dir で ok.js が解決される
+  const { results } = evaluate.evaluateTask(osDir, t.id);
+  assert.strictEqual(results[0].verdict, 'PASS');
+  // 明示指定はtask.work_dirより優先される（ok.jsが無いdirではexit≠0=FAIL）
+  const override = evaluate.evaluateTask(osDir, t.id, { workDir: root });
+  assert.strictEqual(override.results[0].verdict, 'FAIL');
+  // noteは追記され、latest行に累積する
+  evaluate.addTaskNote(osDir, t.id, '調査完了');
+  const after = evaluate.addTaskNote(osDir, t.id, '実装完了');
+  assert.deepStrictEqual(after.notes.map((n) => n.note), ['調査完了', '実装完了']);
+  assert.ok(after.notes.every((n) => n.ts));
+  assert.throws(() => evaluate.addTaskNote(osDir, t.id, ''), /noteが必要/);
+});
