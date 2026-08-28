@@ -149,3 +149,73 @@ test('task: work_dir/refs/notesの引き継ぎ文脈と、evaluateのwork_dirフ
   assert.ok(after.notes.every((n) => n.ts));
   assert.throws(() => evaluate.addTaskNote(osDir, t.id, ''), /noteが必要/);
 });
+
+test('next-action DONE: 接地していない成功基準をcaveatsとして必ず添える', () => {
+  const { osDir } = makeOs();
+  write(osDir, 'evaluators/bound.yaml', [
+    'id: bound',
+    'applies_to: task_artifact',
+    'tier: T0',
+    'kind: outcome',
+    'method: deterministic',
+    'checks:',
+    '  - kind: file_exists',
+    '    path: README.md',
+  ].join('\n'));
+  write(osDir, 'goal.yaml', [
+    'goal: 何かを達成する',
+    'domain: software_engineering',
+    'objectives:',
+    '  - do_it',
+    'success_criteria:',
+    '  - id: sc-001',
+    '    statement: 測れる基準',
+    '    evaluator: bound',
+    '  - id: sc-002',
+    '    statement: 啓蒙性が高い',
+    '    evaluator: unbound',
+    'constraints: []',
+  ].join('\n'));
+  const t = evaluate.newTask(osDir, 'caveats', ['bound']);
+  evaluate.recordVerdict(osDir, { task: t.id, evaluator: 'bound', verdict: 'PASS', evidence: ['e'], provenance: 'deterministic' });
+  const r = evaluate.nextAction(osDir, t.id);
+  assert.strictEqual(r.action, 'DONE');
+  // evaluatorがPASSしても、判定器の無い目的は「測れていない」と明示される
+  assert.ok(r.caveats.some((c) => c.includes('sc-002') && c.includes('測定できていない')), JSON.stringify(r.caveats));
+  // 実行実績のあるbound側はcaveatに現れない
+  assert.ok(!r.caveats.some((c) => c.includes('sc-001')), JSON.stringify(r.caveats));
+});
+
+test('briefing: 実行済みverdictを機械記録として同梱し、0件なら裏付け無しと明示する', () => {
+  const { osDir } = makeOs();
+  write(osDir, 'evaluators/judge.yaml', [
+    'id: judge',
+    'applies_to: task_report',
+    'tier: T1',
+    'method: llm_judge',
+    'rubric: 報告の検証主張に証跡があるか',
+  ].join('\n'));
+  const def = evaluate.loadEvaluatorDef(osDir, 'judge');
+  const t = evaluate.newTask(osDir, '報告の裏付け', ['judge']);
+  const before = fs.readFileSync(evaluate.prepareLlmJudge(osDir, def, { task: t }), 'utf8');
+  assert.ok(before.includes('このタスクで記録されたverdictは0件'), before);
+  evaluate.recordVerdict(osDir, {
+    task: t.id, evaluator: 'unit_test', verdict: 'PASS', evidence: ['npm test: exit 0'], provenance: 'deterministic',
+  });
+  const after = fs.readFileSync(evaluate.prepareLlmJudge(osDir, def, { task: t }), 'utf8');
+  assert.ok(after.includes('unit_test: PASS'), after);
+  assert.ok(after.includes('npm test: exit 0'), after);
+  // 判定中のevaluator自身は同梱しない（自己参照になる）
+  assert.ok(!/^- judge:/m.test(after), after);
+});
+
+test('evaluator kind: conformance|outcome 以外は定義エラー', () => {
+  assert.deepStrictEqual(
+    evaluate.validateEvaluatorDef({ id: 'x', tier: 'T0', method: 'llm_judge', rubric: 'r', kind: 'process' }),
+    ['kindは conformance|outcome']
+  );
+  assert.deepStrictEqual(
+    evaluate.validateEvaluatorDef({ id: 'x', tier: 'T0', method: 'llm_judge', rubric: 'r', kind: 'outcome' }),
+    []
+  );
+});

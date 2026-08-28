@@ -73,4 +73,6 @@ goal.yaml のドメインを調査し、World Model を構築する。
 
 8. Token Ledgerに記録する:
 
-       node cli/index.js ledger add --purpose discover-domain --tier T3 --tokens-in <n> --tokens-out <n> --session R001
+       node cli/index.js ledger add --purpose discover-domain --tier T3 --session R001
+
+見積りは台帳に入れない（API実測値があるときだけ `--tokens-in <n> --tokens-out <n> --measured` を付ける）。

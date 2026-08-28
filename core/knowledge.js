@@ -28,7 +28,10 @@ function researchFile(osDir) {
 }
 
 // 全LLM作業の自己申告記録（Skillの義務）
-function ledgerAdd(osDir, { purpose, tier, model, tokens_in, tokens_out, task, session, asset_refs }) {
+// トークン値は実行者の手入力であり、測定値と見積りが混ざると optimization の
+// コスト判断を誤る。値を入れるなら測定/見積りの別を必ず持たせ、
+// 分からないなら入れない（測れないものを台帳に入れない）。
+function ledgerAdd(osDir, { purpose, tier, model, tokens_in, tokens_out, task, session, asset_refs, measured = false }) {
   if (!purpose) throw new Error('purpose必須');
   if (!TIERS.includes(tier)) throw new Error(`tierは ${TIERS.join('|')}`);
   const entry = {
@@ -36,9 +39,19 @@ function ledgerAdd(osDir, { purpose, tier, model, tokens_in, tokens_out, task, s
     purpose,
     tier,
     model: model || '',
-    tokens_in: Number(tokens_in) || 0,
-    tokens_out: Number(tokens_out) || 0,
   };
+  const hasTokens = tokens_in !== undefined || tokens_out !== undefined;
+  if (hasTokens) {
+    const inN = Number(tokens_in);
+    const outN = Number(tokens_out);
+    if (!Number.isFinite(inN) || !Number.isFinite(outN) || inN < 0 || outN < 0) {
+      throw new Error('tokens_in / tokens_out は0以上の数値を両方指定する（片方だけの記録は集計を歪める）');
+    }
+    entry.tokens_in = inN;
+    entry.tokens_out = outN;
+    // 既定は見積り。APIの実測値を持っている場合だけ measured を立てる
+    entry.estimated = !measured;
+  }
   if (task) entry.task = task;
   if (session) entry.session = session;
   if (asset_refs && asset_refs.length) entry.asset_refs = asset_refs;

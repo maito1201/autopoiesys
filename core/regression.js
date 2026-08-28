@@ -4,7 +4,7 @@
 // fixture付きcheckは検出力テスト（既知の悪い状態に対して検出器が実際にFAILを出せるか）。
 const path = require('node:path');
 const fs = require('node:fs');
-const { loadEvaluatorDef, runDeterministic, runCommand } = require('./evaluate');
+const { loadEvaluatorDef, runDeterministic, runCommand, loadTasks, latestVerdicts } = require('./evaluate');
 const { listGoldenTasks, checkAll, loadConfig } = require('./schema');
 const { readJsonl, appendJsonl, nowIso } = require('./util');
 const { loadFailures, TERMINAL } = require('./failure');
@@ -122,8 +122,29 @@ function runRegression(osDir, { repoRoot, now } = {}) {
   return result;
 }
 
+// 開いているタスクのうち、宣言済みevaluatorのverdictが揃っていないもの。
+// 「評価器を一度も呼ばずに完成報告した」を決定的に検出する手掛かり。
+function openTasksWithoutVerdicts(osDir) {
+  const rows = [];
+  let tasks;
+  try {
+    tasks = loadTasks(osDir);
+  } catch {
+    return rows;
+  }
+  for (const t of Object.values(tasks)) {
+    if (t.status && t.status !== 'open') continue;
+    const declared = t.evaluators || [];
+    if (!declared.length) continue;
+    const latest = latestVerdicts(osDir, t.id);
+    const missing = declared.filter((e) => !latest[e]);
+    if (missing.length) rows.push({ id: t.id, missing });
+  }
+  return rows;
+}
+
 // 普段のコマンド実行のついでに出す運用ヒント。マニュアルを読まないユーザーに
-// 「そろそろregression」を届けるための決定的チェック（LLMゼロ）。
+// 「そろそろregression」「評価が未実行」を届けるための決定的チェック（LLMゼロ）。
 function maintenanceHints(osDir, { now } = {}) {
   const hints = [];
   let cfg;
@@ -149,6 +170,15 @@ function maintenanceHints(osDir, { now } = {}) {
     }
   }
 
+  // 未評価のまま開いているタスク。評価器を呼ばずに完了報告できてしまう穴を、
+  // 報告の文面ではなくCLI出力（Skillが中継を義務づけられている経路）で塞ぐ。
+  for (const t of openTasksWithoutVerdicts(osDir)) {
+    hints.push(
+      `警告: ${t.id} の評価が未実行（未記録のevaluator: ${t.missing.join(', ')}）。` +
+      `完了報告の前に node cli/index.js evaluate --task ${t.id} → next-action ${t.id} を実行すること`
+    );
+  }
+
   for (const f of Object.values(loadFailures(osDir))) {
     if (TERMINAL.includes(f.state)) continue;
     const age = Math.floor((nowMs - Date.parse(f.reported_ts || f.ts)) / 86400000);
@@ -161,4 +191,4 @@ function maintenanceHints(osDir, { now } = {}) {
   return hints;
 }
 
-module.exports = { runRegression, maintenanceHints };
+module.exports = { runRegression, maintenanceHints, openTasksWithoutVerdicts };

@@ -205,6 +205,28 @@ function checkAll(osDir, { now } = {}) {
       }
     }
   }
+  // 成功基準は「規定への適合（conformance）」だけでは接地しない。適合を全通過しても
+  // 目的未達でありうるため、outcome型の判定器が1つも無い成功基準を警告する。
+  if (goal) {
+    const unbackedByOutcome = [];
+    for (const item of goal.success_criteria || []) {
+      if (!item || !item.id) continue;
+      if (!item.evaluator || item.evaluator === 'unbound' || !evs.includes(item.evaluator)) continue;
+      let def;
+      try {
+        def = loadEvaluatorDef(osDir, item.evaluator);
+      } catch {
+        continue; // 定義エラーは上のループで報告済み
+      }
+      if (def.kind !== 'outcome') unbackedByOutcome.push(`${item.id}→${item.evaluator}`);
+    }
+    if (unbackedByOutcome.length) {
+      report.warnings.push(
+        `outcome型の判定器で裏付けられていない成功基準が${unbackedByOutcome.length}件（${unbackedByOutcome.join(', ')}）` +
+        '— evaluatorに kind: conformance | outcome を宣言し、各success_criteriaに最低1つのoutcomeを束縛せよ'
+      );
+    }
+  }
   // 未完了タスクのevaluator参照（大文字小文字の不一致はLinux移送時に初めて壊れるため、ここで検出する）
   for (const t of Object.values(loadTasks(osDir))) {
     if (t.status === 'done') continue;

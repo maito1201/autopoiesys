@@ -17,9 +17,20 @@ function computeMetrics(osDir) {
   const byTier = {};
   const byTask = {};
   let totalTokens = 0;
+  let estimatedTokens = 0;
+  let measuredTokens = 0;
+  let entriesWithoutTokens = 0;
   for (const c of costs) {
+    if (c.tokens_in === undefined && c.tokens_out === undefined) {
+      entriesWithoutTokens++;
+      continue;
+    }
     const t = (c.tokens_in || 0) + (c.tokens_out || 0);
     totalTokens += t;
+    // estimated未設定の旧エントリは出所が判別できない。見積り側に寄せて
+    // 「実測である」と誤読させない
+    if (c.estimated === false) measuredTokens += t;
+    else estimatedTokens += t;
     byTier[c.tier || '?'] = (byTier[c.tier || '?'] || 0) + t;
     if (c.task) byTask[c.task] = (byTask[c.task] || 0) + t;
   }
@@ -87,6 +98,10 @@ function computeMetrics(osDir) {
     },
     tokens: {
       total: totalTokens,
+      // 手入力の見積りと実測を混ぜたままコスト判断をしない（optimization: token_efficiency）
+      measured: measuredTokens,
+      estimated: estimatedTokens,
+      entries_without_tokens: entriesWithoutTokens,
       by_tier: byTier,
       by_task: byTask,
       cheap_path_coverage: cheapPathCoverage,

@@ -26,6 +26,13 @@ description: 目的に応じた独立評価システムを構築する。goal.ya
    - llm_judgeのrubricには「UNCERTAINと言ってよい条件」を必ず書く（偽PASSより
      UNCERTAINが望ましい）
    - hard制約のEvaluatorは可能な限りT0にする（違反検出を決定的にする）
+   - **`kind` を必ず宣言する**: `conformance`（規定への適合: 枠・語彙・引用・プロセス）か
+     `outcome`（目的の達成: 成果物の外側の効果）。
+     **各success_criteriaには最低1つ outcome を束縛する** — conformanceだけで固めると、
+     形式検査を全通過しながら目的未達の成果物が完成扱いになる。
+     outcomeは「初見の読者が指定の発見に到達できるか」のように成果物の外を測るもので、
+     決定的に書けないなら golden_tasks に人間判定1回を型として残す形でよい。
+     `check` は outcome で裏付けられていない success_criteria を警告する
 
 4. goal.yaml の `evaluator: unbound` を実IDに置き換え、検証する:
 
@@ -43,4 +50,7 @@ description: 目的に応じた独立評価システムを構築する。goal.ya
 
 ## Token Ledger
 
-    node cli/index.js ledger add --purpose build-evaluation-model --tier T2 --tokens-in <n> --tokens-out <n>
+    node cli/index.js ledger add --purpose build-evaluation-model --tier T2
+
+トークン数は任意。見積りを台帳に入れない（実測値があるときだけ
+`--tokens-in <n> --tokens-out <n> --measured`）。

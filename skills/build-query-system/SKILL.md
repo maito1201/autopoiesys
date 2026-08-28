@@ -59,4 +59,6 @@ OSS Coreへのステップ追加提案として `.os/proposals/` に書く。
 
 ## Token Ledger
 
-    node cli/index.js ledger add --purpose build-query-system --tier T2 --tokens-in <n> --tokens-out <n>
+    node cli/index.js ledger add --purpose build-query-system --tier T2
+
+見積りは台帳に入れない（API実測値があるときだけ `--tokens-in <n> --tokens-out <n> --measured` を付ける）。

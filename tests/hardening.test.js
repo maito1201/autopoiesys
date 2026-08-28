@@ -4,6 +4,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { makeOs, write, statement } = require('./helpers');
 const store = require('../core/store');
 const evaluate = require('../core/evaluate');
@@ -12,6 +13,8 @@ const { parseYaml } = require('../core/yaml');
 const knowledge = require('../core/knowledge');
 const { ingestRepo } = require('../core/ingest');
 const schema = require('../core/schema');
+const regression = require('../core/regression');
+const metrics = require('../core/metrics');
 
 test('外部verdict: deterministic評価は受理せず、provenance偽装は矯正される（§26③）', () => {
   const { root, osDir } = makeOs();
@@ -191,7 +194,6 @@ test('Evaluator/Query IDは定義内idとの厳密一致を要求（大小文字
 
 test('checkは未完了タスクの存在しないevaluator参照を検出する', () => {
   const { osDir } = makeOs();
-  const schema = require('../core/schema');
   evaluate.newTask(osDir, '参照壊れ', ['No_Such_Evaluator']);
   const r = schema.checkAll(osDir);
   assert.ok(r.errors.some((e) => e.includes('No_Such_Evaluator')));
@@ -281,4 +283,110 @@ test('excluded_sources: 理由なしの除外は拒否される（取りこぼ�
   const ex = schema.resolveExcludedSources(schema.loadGoal(osDir), osDir);
   assert.strictEqual(ex.length, 1);
   assert.ok(path.isAbsolute(ex[0].path));
+});
+
+test('maintenanceHints: 評価未実行のopenタスクを警告として中継経路に載せる', () => {
+  const { osDir } = makeOs();
+  const t = evaluate.newTask(osDir, '未評価のまま完成報告する経路', ['det', 'judge']);
+  const before = regression.maintenanceHints(osDir);
+  const warn = before.find((h) => h.startsWith('警告:') && h.includes(t.id));
+  assert.ok(warn, JSON.stringify(before));
+  assert.ok(warn.includes('det') && warn.includes('judge'), warn);
+  // 片方だけ記録しても、残りが未記録なら警告は消えない
+  evaluate.recordVerdict(osDir, { task: t.id, evaluator: 'det', verdict: 'PASS', evidence: ['e'], provenance: 'deterministic' });
+  assert.ok(regression.maintenanceHints(osDir).some((h) => h.includes(t.id) && h.includes('judge')));
+  // 全て記録されれば消える
+  evaluate.recordVerdict(osDir, { task: t.id, evaluator: 'judge', verdict: 'PASS', evidence: ['e'] });
+  assert.ok(!regression.maintenanceHints(osDir).some((h) => h.includes(t.id)));
+});
+
+test('ledger: トークンは任意。入れた値は既定で見積り扱いになり、実測と分けて集計される', () => {
+  const { osDir } = makeOs();
+  // 測れないなら入れない（0を捏造しない）
+  const noTokens = knowledge.ledgerAdd(osDir, { purpose: 'run-task', tier: 'T2' });
+  assert.strictEqual(noTokens.tokens_in, undefined);
+  assert.strictEqual(noTokens.estimated, undefined);
+  // 手入力は見積り
+  const est = knowledge.ledgerAdd(osDir, { purpose: 'run-task', tier: 'T2', tokens_in: 18000, tokens_out: 1500 });
+  assert.strictEqual(est.estimated, true);
+  // API実測値だけが measured
+  const measured = knowledge.ledgerAdd(osDir, { purpose: 'run-task', tier: 'T2', tokens_in: 10, tokens_out: 5, measured: true });
+  assert.strictEqual(measured.estimated, false);
+  // 片側だけの入力は集計を歪めるので拒否
+  assert.throws(() => knowledge.ledgerAdd(osDir, { purpose: 'x', tier: 'T2', tokens_in: 100 }), /両方指定/);
+  const m = metrics.computeMetrics(osDir);
+  assert.strictEqual(m.tokens.estimated, 19500);
+  assert.strictEqual(m.tokens.measured, 15);
+  assert.strictEqual(m.tokens.entries_without_tokens, 1);
+});
+
+test('check: outcome型の判定器で裏付けられていない成功基準を警告する', () => {
+  const { root, osDir } = makeOs();
+  write(root, 'README.md', '# x\n');
+  const evaluator = (id, kind) => [
+    `id: ${id}`,
+    'applies_to: task_artifact',
+    'tier: T0',
+    ...(kind ? [`kind: ${kind}`] : []),
+    'method: deterministic',
+    'checks:',
+    '  - kind: file_exists',
+    '    path: README.md',
+  ].join('\n');
+  write(osDir, 'evaluators/form_check.yaml', evaluator('form_check', 'conformance'));
+  write(osDir, 'evaluators/reader_reaches.yaml', evaluator('reader_reaches', 'outcome'));
+  const goal = (ev) => [
+    'goal: x',
+    'domain: d',
+    'objectives: [o]',
+    'success_criteria:',
+    '  - id: sc-001',
+    '    statement: 読者が目的の発見に到達する',
+    `    evaluator: ${ev}`,
+    'constraints: []',
+    'sources:',
+    '  - repo: .',
+  ].join('\n');
+  write(osDir, 'goal.yaml', goal('form_check'));
+  const conformanceOnly = schema.checkAll(osDir);
+  assert.ok(conformanceOnly.warnings.some((w) => w.includes('sc-001→form_check')), JSON.stringify(conformanceOnly.warnings));
+  write(osDir, 'goal.yaml', goal('reader_reaches'));
+  assert.ok(!schema.checkAll(osDir).warnings.some((w) => w.includes('sc-001')));
+});
+
+test('CLI next-action: DONEのcaveatsを出力から落とさない', () => {
+  const { root, osDir } = makeOs();
+  write(root, 'README.md', '# x\n');
+  write(osDir, 'evaluators/bound.yaml', [
+    'id: bound',
+    'applies_to: task_artifact',
+    'tier: T0',
+    'kind: outcome',
+    'method: deterministic',
+    'checks:',
+    '  - kind: file_exists',
+    '    path: README.md',
+  ].join('\n'));
+  write(osDir, 'goal.yaml', [
+    'goal: x',
+    'domain: d',
+    'objectives: [o]',
+    'success_criteria:',
+    '  - id: sc-001',
+    '    statement: 測れる基準',
+    '    evaluator: bound',
+    '  - id: sc-002',
+    '    statement: 測れていない基準',
+    '    evaluator: unbound',
+    'constraints: []',
+  ].join('\n'));
+  const t = evaluate.newTask(osDir, 'cli caveats', ['bound']);
+  evaluate.recordVerdict(osDir, { task: t.id, evaluator: 'bound', verdict: 'PASS', evidence: ['e'], provenance: 'deterministic' });
+  const cli = path.join(__dirname, '..', 'cli', 'index.js');
+  const r = spawnSync(process.execPath, [cli, 'next-action', t.id, '--os-dir', osDir], { encoding: 'utf8' });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes('action: DONE'), r.stdout);
+  // コアが返すcaveatsがCLI出力に現れる（ここが落ちるとDONEが「Goalが測れている」と読まれる）
+  assert.ok(r.stdout.includes('caveats:'), r.stdout);
+  assert.ok(r.stdout.includes('sc-002'), r.stdout);
 });

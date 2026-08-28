@@ -107,59 +107,63 @@ const OS_README = `# .os/ — ユーザー固有Intelligence OS
 OSS本体とは分離して、このディレクトリ自体を独立にバージョン管理することを推奨する。
 `;
 
-function parseFrontmatter(text) {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
-  if (!m) return {};
-  const out = {};
-  for (const line of m[1].split(/\r?\n/)) {
-    const c = line.indexOf(':');
-    if (c > 0) {
-      let v = line.slice(c + 1).trim();
-      // 引用済みの値は中身だけ取り出す（二重引用の防止）
-      if (v.length >= 2 && ((v[0] === '"' && v[v.length - 1] === '"') || (v[0] === "'" && v[v.length - 1] === "'"))) {
-        v = v.slice(1, -1);
-      }
-      out[line.slice(0, c).trim()] = v;
-    }
-  }
-  return out;
+// 対象ワークスペースにClaude Code用のスキル（.claude/skills/）を配置する。
+// 正本はOSS側 skills/ で、ここに置かれるのはその生成コピー。
+// 以前は「正本をReadせよ」と書いた参照スタブだったが、①毎回1回余分なReadを強制し
+// ②スタブと正本のズレを検出できなかったため、内容ごと生成して差分検査可能にした。
+const GENERATED_MARK = 'autopoiesys:generated';
+// 参照スタブ時代の生成物。ユーザーが書いたファイルと区別して置き換える
+const LEGACY_STUB_MARK = 'このSkillの正本は';
+
+function generatedSkillBody(name, canonicalText) {
+  const marker = `<!-- ${GENERATED_MARK} source=skills/${name}/SKILL.md — skills sync の生成物。編集は正本側に行う -->`;
+  const m = /^---\r?\n[\s\S]*?\r?\n---\r?\n/.exec(canonicalText);
+  if (!m) return `${marker}\n\n${canonicalText}`;
+  // マーカー行を除けば正本とバイト一致する（差分検査を素直にするため余分な空行を入れない）
+  return `${m[0]}${marker}\n${canonicalText.slice(m[0].length)}`;
 }
 
-// 対象ワークスペースにClaude Code用のスキルスタブ（.claude/skills/）を生成する。
-// 正本はOSS側 skills/ にあり、スタブは参照のみ（二重管理を避ける）。
-// OSS Coreがワークスペース外にある場合は絶対パスで参照する。
-function scaffoldSkillStubs(targetDir) {
+// 生成物として上書きしてよいか。marker付き（自分の生成物）か、参照スタブ時代の
+// 生成物ならtrue。ユーザーが書いた内容は保護する
+function isManagedSkillFile(text) {
+  return text.includes(GENERATED_MARK) || text.includes(LEGACY_STUB_MARK);
+}
+
+// check=true では書き込まず、正本とズレているものを stale として返す
+function syncSkills(targetDir, { check = false } = {}) {
   const skillsRoot = path.join(OSS_ROOT, 'skills');
   const created = [];
+  const updated = [];
+  const unchanged = [];
   const skipped = [];
-  if (!fs.existsSync(skillsRoot)) return { created, skipped };
-  let ref = path.relative(targetDir, OSS_ROOT).split(path.sep).join('/');
-  if (ref.startsWith('..')) ref = OSS_ROOT.split(path.sep).join('/');
-  const prefix = ref === '' ? '' : `${ref}/`;
+  const stale = [];
+  if (!fs.existsSync(skillsRoot)) return { created, updated, unchanged, skipped, stale };
   for (const entry of fs.readdirSync(skillsRoot, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
     if (!entry.isDirectory()) continue;
     const canonical = path.join(skillsRoot, entry.name, 'SKILL.md');
     if (!fs.existsSync(canonical)) continue;
-    const stub = path.join(targetDir, '.claude', 'skills', entry.name, 'SKILL.md');
-    if (fs.existsSync(stub)) {
-      skipped.push(entry.name); // 既存スタブ（ユーザーが調整済みの可能性）は上書きしない
+    const want = generatedSkillBody(entry.name, readTextFile(canonical));
+    const dest = path.join(targetDir, '.claude', 'skills', entry.name, 'SKILL.md');
+    if (!fs.existsSync(dest)) {
+      if (check) stale.push(entry.name);
+      else atomicWriteFile(dest, want);
+      created.push(entry.name);
       continue;
     }
-    const fm = parseFrontmatter(readTextFile(canonical));
-    atomicWriteFile(stub, [
-      '---',
-      `name: ${entry.name}`,
-      // JSONの二重引用文字列はYAMLのdouble-quoted scalarとして有効。
-      // 説明に「: 」や「#」が入ってもfrontmatterが壊れないようにする。
-      `description: ${JSON.stringify(String(fm.description || `${entry.name} skill`))}`,
-      '---',
-      '',
-      `このSkillの正本は \`${prefix}skills/${entry.name}/SKILL.md\` である。まずそれをReadで読み、その手順に厳密に従うこと。`,
-      '',
-    ].join('\n'));
-    created.push(entry.name);
+    const current = readTextFile(dest);
+    if (current === want) {
+      unchanged.push(entry.name);
+      continue;
+    }
+    if (!isManagedSkillFile(current)) {
+      skipped.push(entry.name); // ユーザーが書き換えた内容は巻き戻さない
+      continue;
+    }
+    if (check) stale.push(entry.name);
+    else atomicWriteFile(dest, want);
+    updated.push(entry.name);
   }
-  return { created, skipped };
+  return { created, updated, unchanged, skipped, stale };
 }
 
 function initOs(targetDir, { force = false } = {}) {
@@ -182,8 +186,8 @@ function initOs(targetDir, { force = false } = {}) {
   writeIfAbsent('goal.yaml', GOAL_TEMPLATE);
   writeIfAbsent(path.join('world_model', 'vocabulary.yaml'), VOCABULARY_TEMPLATE);
   writeIfAbsent('README.md', OS_README);
-  const stubs = scaffoldSkillStubs(targetDir);
+  const stubs = syncSkills(targetDir);
   return { osDir, created: dirs, skill_stubs: stubs };
 }
 
-module.exports = { doctor, initOs, scaffoldSkillStubs };
+module.exports = { doctor, initOs, syncSkills };

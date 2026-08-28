@@ -126,9 +126,18 @@ node cli/index.js audit reachability    # 取り込んだ知識がQueryから引
 
 `check` はこの2つの結果を警告として毎回出すので、普段は気づくだけでよい。
 
-覚えていなくてもよい: 普段のコマンド（タスク登録・評価・feedback等）のついでに、
-regressionが`regression_every_days`（既定7日）を超えて未実行のときや、Failureの滞留が
-締め切りに近づいたとき、OSが「ヒント:」「警告:」として自分から知らせてくる。
+覚えていなくてもよい: 普段のコマンド（タスク登録・成果物登録・評価・feedback・ledger等）の
+ついでに、regressionが`regression_every_days`（既定7日）を超えて未実行のときや、Failureの
+滞留が締め切りに近づいたとき、**評価器を一度も実行しないまま開いているタスクがあるとき**、
+OSが「ヒント:」「警告:」として自分から知らせてくる。
+
+Claude Code用のスキル（`.claude/skills/`）は `skills/` の生成コピーなので、Core更新後は
+同期する。CIに `--check` を置けばズレが検出できる:
+
+```bash
+node cli/index.js skills sync            # 生成コピーを正本に合わせる
+node cli/index.js skills sync --check    # ズレていれば非ゼロ終了（書き換えない）
+```
 
 ## 6. 中身を理解したくなったら、この順に読む
 

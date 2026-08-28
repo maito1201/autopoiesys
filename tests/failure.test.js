@@ -1,6 +1,8 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert');
+const fs = require('node:fs');
+const path = require('node:path');
 const { makeOs } = require('./helpers');
 const failure = require('../core/failure');
 
@@ -100,4 +102,33 @@ test('investigated済みならaccepted_riskでwhy_undetectedを再要求しな�
   failure.transition(osDir, entry.id, 'investigated', { root_cause: 'x', why_undetected: 'y' });
   const r = failure.transition(osDir, entry.id, 'accepted_risk', { reason: '対策コスト過大' });
   assert.strictEqual(r.state, 'accepted_risk');
+});
+
+test('classified(missing_evaluator): evaluator提案スタブを起票しFailureに紐づける', () => {
+  const { osDir } = makeOs();
+  const { entry } = failure.report(osDir, { symptom: '創作値が成果物に載った' });
+  failure.transition(osDir, entry.id, 'investigated', {
+    root_cause: '値の出典突合が無い',
+    why_undetected: '引用IDの実在しか見ていない',
+  });
+  const e = failure.transition(osDir, entry.id, 'classified', { classification: 'missing_evaluator' });
+  assert.strictEqual(e.proposal_stub, path.join('proposals', `${entry.id}-evaluator.yaml`));
+  const stub = fs.readFileSync(path.join(osDir, e.proposal_stub), 'utf8');
+  assert.ok(stub.includes(`id: ${entry.id.toLowerCase()}_detector`), stub);
+  assert.ok(stub.includes(`origin_failure: ${entry.id}`), stub);
+  // 調査で言語化させた内容が提案に引き継がれる
+  assert.ok(stub.includes('引用IDの実在しか見ていない'), stub);
+  // 提案どまりであり、evaluators/ には置かれない（適用は承認制のまま）
+  assert.ok(!fs.existsSync(path.join(osDir, 'evaluators', `${entry.id.toLowerCase()}_detector.yaml`)));
+});
+
+test('提案スタブは既存ファイルを上書きしない', () => {
+  const { osDir } = makeOs();
+  const { entry } = failure.report(osDir, { symptom: '別の症状' });
+  const file = path.join(osDir, 'proposals', `${entry.id}-evaluator.yaml`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '# 人が書いた提案\n', 'utf8');
+  failure.transition(osDir, entry.id, 'investigated', { root_cause: 'r', why_undetected: 'w' });
+  failure.transition(osDir, entry.id, 'classified', { classification: 'missing_evaluator' });
+  assert.strictEqual(fs.readFileSync(file, 'utf8'), '# 人が書いた提案\n');
 });

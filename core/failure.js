@@ -1,8 +1,9 @@
 'use strict';
 // Failure台帳と状態機械。「ログとして保存して終わる」(設計原則§26④) と
 // 「局所修正で終わる」(§26⑦) を遷移条件で機械的に禁止する。
+const fs = require('node:fs');
 const path = require('node:path');
-const { readJsonl, appendJsonl, nowIso, nextId, fingerprint } = require('./util');
+const { readJsonl, appendJsonl, nowIso, nextId, fingerprint, atomicWriteFile } = require('./util');
 
 const STATES = ['reported', 'investigated', 'classified', 'upgrade_proposed', 'implemented', 'accepted_risk'];
 const TERMINAL = ['implemented', 'accepted_risk'];
@@ -105,8 +106,42 @@ function transition(osDir, id, to, fields = {}) {
   }
   if (errors.length) throw new Error(`遷移 ${id} -> ${to} の必須フィールド不足:\n  ${errors.join('\n  ')}`);
   const entry = { id, ts: nowIso(), state: to, ...fields };
+  // 「分類しても検出器は生まれない」を塞ぐ。missing_evaluator と分類した時点で
+  // 提案スタブを起票し、Failureに紐づける（適用は upgrade-os の承認制のまま）。
+  const stub = scaffoldClassificationProposal(osDir, cur, fields);
+  if (stub) entry.proposal_stub = stub;
   appendJsonl(ledgerFile(osDir), entry);
   return entry;
+}
+
+// classification に対応する提案スタブを .os/proposals/ に生成する。
+// 既存ファイルは上書きしない（人が書き足した提案を巻き戻さない）。
+function scaffoldClassificationProposal(osDir, cur, fields) {
+  if (fields.classification !== 'missing_evaluator') return null;
+  const file = path.join(osDir, 'proposals', `${cur.id}-evaluator.yaml`);
+  if (fs.existsSync(file)) return path.relative(osDir, file);
+  const evId = `${cur.id.toLowerCase()}_detector`;
+  atomicWriteFile(file, [
+    `# ${cur.id} の分類 missing_evaluator から自動起票された提案スタブ。`,
+    '# 未適用の提案であり、evaluators/ に移すまで評価には使われない。',
+    `# 症状: ${String(cur.symptom || '').replace(/\r?\n/g, ' ')}`,
+    `# 根本原因: ${String(cur.root_cause || '(未記入)').replace(/\r?\n/g, ' ')}`,
+    `# なぜ検出できなかったか: ${String(cur.why_undetected || '(未記入)').replace(/\r?\n/g, ' ')}`,
+    '#',
+    '# 埋めること: applies_to（この検出器が対象にする成果物の型）、method（deterministic/command なら',
+    '# checks/argv、llm_judge なら rubric）、kind（conformance=規定への適合 / outcome=目的の達成）。',
+    `id: ${evId}`,
+    'applies_to: TODO',
+    'tier: T0',
+    'kind: conformance',
+    'method: deterministic',
+    'checks:',
+    '  - kind: file_matches',
+    '    path: TODO',
+    '    pattern: TODO',
+    `origin_failure: ${cur.id}`,
+  ].join('\n') + '\n');
+  return path.relative(osDir, file);
 }
 
 // 非終端のまま滞留したFailureを検出する。regressionはこれを不合格条件に含める。
@@ -131,4 +166,4 @@ function lint(osDir, { staleAfterDays = 7, now } = {}) {
   return violations;
 }
 
-module.exports = { STATES, TERMINAL, CLASSIFICATIONS, loadFailures, report, transition, lint };
+module.exports = { STATES, TERMINAL, CLASSIFICATIONS, loadFailures, report, transition, lint, scaffoldClassificationProposal };

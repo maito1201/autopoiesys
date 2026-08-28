@@ -45,7 +45,9 @@ OS Upgradeは資産のdiffとして適用し、必ずregressionで検証する�
 
 6. Token Ledger:
 
-       node cli/index.js ledger add --purpose upgrade-os --tier T2 --tokens-in <n> --tokens-out <n>
+       node cli/index.js ledger add --purpose upgrade-os --tier T2
+
+見積りは台帳に入れない（API実測値があるときだけ `--tokens-in <n> --tokens-out <n> --measured` を付ける）。
 
 ## 禁止事項
 

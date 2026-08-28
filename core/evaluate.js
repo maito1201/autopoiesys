@@ -12,6 +12,10 @@ const { runQuery } = require('./query');
 const VERDICTS = ['PASS', 'FAIL', 'UNCERTAIN'];
 const REASONS = ['insufficient_evidence', 'model_limitation', 'conflicting_evidence'];
 const METHODS = ['deterministic', 'command', 'llm_judge'];
+// 何を見る評価器か。conformance=規定への適合（枠・語彙・引用・プロセス）、
+// outcome=目的の達成（外側の効果）。両者を区別しないと、適合だけを全通過して
+// 目的未達の成果物が完成扱いになる。
+const EVALUATOR_KINDS = ['conformance', 'outcome'];
 const CHECK_KINDS = ['file_exists', 'file_absent', 'file_matches', 'file_not_matches', 'query_empty', 'query_nonempty', 'query_matches', 'query_not_matches'];
 
 function evaluatorsDir(osDir) {
@@ -57,6 +61,9 @@ function validateEvaluatorDef(def) {
   // evaluatorごとに実行ディレクトリが違うため、単一のwork_dirでは検証先を誤る。
   if (def.scope !== undefined && (typeof def.scope !== 'string' || !def.scope)) {
     errors.push('scopeは非空の文字列（対象リポジトリのscope名）');
+  }
+  if (def.kind !== undefined && !EVALUATOR_KINDS.includes(def.kind)) {
+    errors.push(`kindは ${EVALUATOR_KINDS.join('|')}`);
   }
   if (def.method === 'deterministic') {
     if (!Array.isArray(def.checks) || def.checks.length === 0) errors.push('deterministicはchecks必須');
@@ -245,6 +252,30 @@ function runCommand(def, { workDir }) {
 
 // llm_judge: 判定依頼briefingを生成する。verdict自体は独立サブエージェントが
 // `autopoiesys verdict --file` で記録する（このプロセスはLLMを呼ばない）。
+// briefingに同梱する「OSが機械記録した検証実績」。判定中のevaluator自身は除く
+// （まだverdictが無いのが正常であり、含めると自己参照になる）。
+function recordedVerificationSection(osDir, task, def) {
+  const rows = readJsonl(verdictLog(osDir))
+    .filter((r) => r.task === task.id && r.evaluator !== def.id);
+  const parts = ['## OSが記録した検証実績（機械記録。実行者の自己申告ではない）'];
+  if (!rows.length) {
+    parts.push('');
+    parts.push('**このタスクで記録されたverdictは0件**。');
+    parts.push('報告に検証の主張（テスト通過・lint通過・動作確認等）があっても、OS側に裏付けは無い。');
+    parts.push('報告本文に添えられたコマンドと出力だけを証跡として扱い、足りなければ UNCERTAIN とせよ。');
+    parts.push('');
+    return parts;
+  }
+  parts.push('');
+  for (const r of rows) {
+    const ev = (r.evidence || []).map((e) => String(e).replace(/\s+/g, ' ').slice(0, 160));
+    parts.push(`- ${r.evaluator}: ${r.verdict}（provenance=${r.provenance}, ${r.ts}）`);
+    for (const e of ev.slice(0, 3)) parts.push(`  - ${e}`);
+  }
+  parts.push('');
+  return parts;
+}
+
 function prepareLlmJudge(osDir, def, { task, artifacts }) {
   const parts = [];
   parts.push(`# 独立評価依頼: ${def.id}`);
@@ -259,6 +290,9 @@ function prepareLlmJudge(osDir, def, { task, artifacts }) {
   for (const a of task.artifacts || []) parts.push(`- ${a.path}${a.note ? ` — ${a.note}` : ''}`);
   if (artifacts && artifacts.length) for (const a of artifacts) parts.push(`- ${a}`);
   parts.push('');
+  // 報告の「検証しました」は自己申告であり、それ自体は証跡にならない。
+  // OSが機械記録したverdictを判定材料として同梱し、申告と記録の突合を可能にする（c-001）。
+  parts.push(...recordedVerificationSection(osDir, task, def));
   // context_queriesは常に空paramsで呼ばれていたため、横断タスクでも絞り込みが効かなかった。
   // タスクの対象リポジトリをscopeとして渡す（カンマ区切りはOR = 触る全リポジトリの和集合）。
   const queryParams = {};
@@ -561,11 +595,33 @@ function nextAction(osDir, taskId) {
   }
   // statusは常に最新のactionに従う（一度doneでも新たなFAILでopenに戻る）
   updateTask(osDir, taskId, { status: action === 'DONE' ? 'done' : 'open', last_action: action });
-  return { task: taskId, action, why, verdicts: detail, missing };
+  const result = { task: taskId, action, why, verdicts: detail, missing };
+  // DONEは「このタスクのevaluatorが全てPASS」であって「Goalが測れている」ではない。
+  // 接地していない成功基準・制約をcaveatsとして必ず添え、完了報告に明示させる。
+  if (action === 'DONE') {
+    const caveats = unmeasuredCriteria(osDir);
+    if (caveats.length) result.caveats = caveats;
+  }
+  return result;
+}
+
+// goal.yamlのsuccess_criteria/constraintsのうち、判定器が無い（MISSING）か
+// 一度も実行されていない（UNVERIFIED）もの。Gap Analysisの criteria-only と同じ判定。
+function unmeasuredCriteria(osDir) {
+  let analysis;
+  try {
+    analysis = require('./gap').gapAnalysis(osDir, { criteriaOnly: true });
+  } catch {
+    return []; // goal.yaml未整備でも完了判定そのものは止めない
+  }
+  return analysis.required
+    .filter((r) => r.classification === 'MISSING' || r.classification === 'UNVERIFIED')
+    .map((r) => `${r.id}「${r.body}」は現在測定できていない（${r.classification}: ${r.why}）`);
 }
 
 module.exports = {
   VERDICTS,
+  EVALUATOR_KINDS,
   loadEvaluatorDef,
   listEvaluators,
   validateEvaluatorDef,
@@ -581,4 +637,5 @@ module.exports = {
   evaluateTask,
   latestVerdicts,
   nextAction,
+  unmeasuredCriteria,
 };

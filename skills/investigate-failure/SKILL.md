@@ -39,6 +39,11 @@ Root Cause → 検出・予防戦略 → OS Upgrade提案 に変換する。T3�
        node cli/index.js failure transition <F> --to investigated --file <fields.json>
        node cli/index.js failure transition <F> --to classified --file <fields.json>
 
+   `missing_evaluator` と分類すると、コアが `.os/proposals/<F>-evaluator.yaml` に
+   検出器の提案スタブを自動起票する（遷移出力の `proposal_stub`）。
+   **分類しただけで終わらせず、このスタブの `applies_to` / `method` / `checks` を埋めて
+   手順5の提案に含めること。** 埋めなければ「分類はしたが検出器は生まれていない」ままになる。
+
 5. OS Upgrade提案を作る。**最低限、次の2点を必ず含める**（コアが強制する）:
    - 新しいgolden task（このFailureの再発を検出する回帰テスト。可能なら既知の悪い状態を
      fixtureとして残し、検出器が実際にFAILを出せることを検証する = 検出力テスト）
@@ -53,10 +58,14 @@ Root Cause → 検出・予防戦略 → OS Upgrade提案 に変換する。T3�
 
 7. Token Ledger:
 
-       node cli/index.js ledger add --purpose investigate-failure --tier T3 --tokens-in <n> --tokens-out <n>
+       node cli/index.js ledger add --purpose investigate-failure --tier T3
+
+   トークン数は任意。実測値を持っていない見積りは入れない（入れる場合は既定で
+   `estimated: true`、API実測値のときだけ `--tokens-in <n> --tokens-out <n> --measured`）。
 
 ## 禁止事項
 
 - Failureをreportedのまま放置する（failure lintがregressionを不合格にする）
 - 「このバグを直す」だけで終わる（why_undetectedに答えない提案は不完全）
+- 分類だけして提案スタブを空のまま放置する（分類は検出器の代わりにならない）
 - ユーザー承認なしのOS変更適用

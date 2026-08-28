@@ -126,6 +126,14 @@ Next Action Engine（`autopoiesys next-action <task>`）が§11の決定表を�
 PASS→DONE / FAIL→FIX / UNCERTAIN→INVESTIGATE / 証拠不足→COLLECT_EVIDENCE /
 モデル限界→DEEP_RESEARCH / 矛盾→RESOLVE_CONFLICT。
 **Agentの「完了しました」はどのコードパスでも使われない（§26③）。**
+DONEには `caveats`（判定器が無い・一度も実行されていない success_criteria / constraints）が
+添えられる。**DONEは「このタスクのevaluatorが全てPASS」であって「Goalが測れている」ではない**ため、
+測れていない目的を完了報告の中で沈黙させない。
+
+Agentがそもそもevaluateを呼ばずに完了報告する経路は、決定的な運用ヒント
+（`maintenanceHints`: 未評価のまま開いているタスクを警告として出す）で塞ぐ。
+task new / task artifact / evaluate / next-action / feedback / ledger add の出力に載り、
+Skillはこれを省略せず中継する義務を負う。
 
 - 代替案: エージェント自己申告（§26③で明示禁止）/ 全件LLM判定（非決定・高コスト・
   回帰の再現性喪失）/ 全件決定的（曖昧な基準を扱えずカバレッジの穴が沈黙。UNCERTAIN+
@@ -357,6 +365,7 @@ Artifact → Expected state → Evidence → Evaluation → PASS/FAIL/UNCERTAIN 
 評価結果から次の行動を決定する:
 PASS→DONE / FAIL→FIX / UNCERTAIN→INVESTIGATE / 証拠不足→COLLECT_EVIDENCE /
 モデル限界→DEEP_RESEARCH / 矛盾する証拠→RESOLVE_CONFLICT。
+DONEには接地していない成功基準がcaveatsとして添えられる（測れていないことを黙らせない）。
 
 ### §12 Failure Learning
 

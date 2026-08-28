@@ -158,4 +158,6 @@ OSは作って終わりではなく、使われて育つ。次の3点を短く�
 
 このSkillでの自分のLLM作業を記録する（概算でよい）:
 
-    node cli/index.js ledger add --purpose init-os --tier T2 --tokens-in <n> --tokens-out <n>
+    node cli/index.js ledger add --purpose init-os --tier T2
+
+見積りは台帳に入れない（API実測値があるときだけ `--tokens-in <n> --tokens-out <n> --measured` を付ける）。

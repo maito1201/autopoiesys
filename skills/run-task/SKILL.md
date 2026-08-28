@@ -118,6 +118,10 @@ Task → Code → Done ではなく、Objective → Plan → Execute → Evaluat
 
        node cli/index.js next-action <id>
 
+   DONEに `caveats` が付いていたら、**完了報告にそのまま転記する**。caveatsは
+   「タスクのevaluatorは全てPASSしたが、この目的は現在測定できていない」という宣言であり、
+   握りつぶすと「形式検査を全通過して目的未達」を完成として渡すことになる。
+
    | 結果 | 行動 |
    |---|---|
    | DONE | 完了。ユーザーに報告 |
@@ -132,17 +136,26 @@ Task → Code → Done ではなく、Objective → Plan → Execute → Evaluat
 
 8. Token Ledgerに記録する:
 
-       node cli/index.js ledger add --purpose run-task --tier T2 --tokens-in <n> --tokens-out <n> --task <id>
+       node cli/index.js ledger add --purpose run-task --tier T2 --task <id>
+
+   **トークン数は任意。実測値を持っていないなら入れない**（見積りを台帳に残すと
+   コスト判断を誤る）。入れる場合は既定で見積り扱い（`estimated: true`）になり、
+   API実測値のときだけ `--tokens-in <n> --tokens-out <n> --measured` を付ける。
 
 ## 運用ヒントの中継
 
-CLI出力に「ヒント:」「警告:」で始まる行（regression推奨・Failure滞留）が含まれていたら、
-省略せずユーザーにそのまま伝える。マニュアルを読まないユーザーに運用を届ける経路なので、
-握りつぶさないこと。
+CLI出力に「ヒント:」「警告:」で始まる行（regression推奨・Failure滞留・**評価未実行**）が
+含まれていたら、省略せずユーザーにそのまま伝える。マニュアルを読まないユーザーに運用を
+届ける経路なので、握りつぶさないこと。
+
+特に「評価が未実行」の警告は、手順5-6を飛ばして完了報告に入ろうとしていることの
+機械的な検出である。この警告が出ている状態で完了報告を書いてはならない。
 
 ## 禁止事項
 
 - 自分の判断でタスクをDONE扱いにすること（next-actionがDONEを返すまで完了ではない）
+- 評価器を一度も実行しないまま完了報告を書くこと（「評価が未実行」警告が出ている状態での報告）
+- next-actionのcaveatsを完了報告から省くこと
 - Queryを経由しない文脈収集（.os/world_model/ の直接読み込み）
 - events.jsonlの直接編集（還流は `statement add` / `statement supersede` 経由のみ）
 - 評価Evaluatorの選定を評価の直前に緩めること

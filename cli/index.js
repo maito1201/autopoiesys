@@ -112,9 +112,30 @@ const COMMANDS = {
     const r = scaffold.initOs(dir, { force: !!args.flags.force });
     out({
       message: `.os/ を生成した: ${r.osDir}`,
-      skill_stubs: `生成${r.skill_stubs.created.length}件 / 既存スキップ${r.skill_stubs.skipped.length}件（.claude/skills/）`,
-      next: '新しいスタブはClaude Codeの次回セッション起動から有効。/init-os のヒアリングでgoal.yamlを埋め、autopoiesys validate で検証する',
+      skills: `生成${r.skill_stubs.created.length}件 / 更新${r.skill_stubs.updated.length}件 / ユーザー改変につきスキップ${r.skill_stubs.skipped.length}件（.claude/skills/）`,
+      next: '新しいスキルはClaude Codeの次回セッション起動から有効。/init-os のヒアリングでgoal.yamlを埋め、autopoiesys validate で検証する',
     }, args.flags);
+    return 0;
+  },
+
+  // .claude/skills/ は skills/ の生成物。--check は正本とのズレを検出して非ゼロで落ちる
+  skills(args) {
+    if (args.positional[0] !== 'sync') throw new Error('使い方: autopoiesys skills sync [--dir D] [--check]');
+    const dir = args.flags.dir ? path.resolve(String(args.flags.dir)) : process.cwd();
+    const check = args.flags.check === true;
+    const r = scaffold.syncSkills(dir, { check });
+    out({
+      mode: check ? 'check' : 'sync',
+      created: r.created,
+      updated: r.updated,
+      unchanged: r.unchanged.length,
+      skipped_user_modified: r.skipped,
+      stale: r.stale,
+    }, args.flags);
+    if (check && r.stale.length) {
+      process.stderr.write(`正本とズレたスキルが${r.stale.length}件: ${r.stale.join(', ')}（autopoiesys skills sync で再生成する）\n`);
+      return 1;
+    }
     return 0;
   },
 
@@ -444,6 +465,9 @@ const COMMANDS = {
       const artifacts = [...(t.artifacts || []), { path: String(args.flags.path), note: args.flags.note ? String(args.flags.note) : '' }];
       evaluate.updateTask(osDir, id, { artifacts });
       out({ task: id, artifacts: artifacts.length, added: String(args.flags.path) }, args.flags);
+      // 成果物登録は完了報告の直前に通る地点。ここで未評価を告げないと、
+      // 評価器を呼ばないまま完成報告する経路が開いたままになる
+      printHints(osDir);
       return 0;
     }
     if (sub === 'set-evaluators') {
@@ -494,7 +518,11 @@ const COMMANDS = {
     const taskId = args.positional[0] || args.flags.task;
     if (!taskId) throw new Error('使い方: autopoiesys next-action <taskId>');
     const r = evaluate.nextAction(osDir, String(taskId));
-    out({ task: r.task, action: r.action, why: r.why, missing: r.missing }, args.flags);
+    // caveatsは「evaluatorは全てPASSだが、この目的は測れていない」の宣言。
+    // 出力から落とすとDONEが「Goalが測れている」と読まれる
+    const shown = { task: r.task, action: r.action, why: r.why, missing: r.missing };
+    if (r.caveats) shown.caveats = r.caveats;
+    out(shown, args.flags);
     printHints(osDir);
     return 0;
   },
@@ -586,18 +614,21 @@ const COMMANDS = {
 
   ledger(args) {
     const osDir = requireOsDir(args.flags);
-    if (args.positional[0] !== 'add') throw new Error('使い方: autopoiesys ledger add --purpose p --tier T2 --tokens-in N --tokens-out N [--task T001] [--model m] [--session R001] [--assets a,b]');
+    if (args.positional[0] !== 'add') throw new Error('使い方: autopoiesys ledger add --purpose p --tier T2 [--tokens-in N --tokens-out N [--measured]] [--task T001] [--model m] [--session R001] [--assets a,b]\n  トークンは任意。入れる場合は既定で見積り扱い（estimated: true）になり、API実測値のときだけ --measured を付ける');
     const r = knowledge.ledgerAdd(osDir, {
       purpose: args.flags.purpose ? String(args.flags.purpose) : undefined,
       tier: String(args.flags.tier || ''),
       model: args.flags.model ? String(args.flags.model) : '',
       tokens_in: args.flags['tokens-in'],
       tokens_out: args.flags['tokens-out'],
+      measured: args.flags.measured === true,
       task: args.flags.task ? String(args.flags.task) : undefined,
       session: args.flags.session ? String(args.flags.session) : undefined,
       asset_refs: args.flags.assets ? String(args.flags.assets).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
     });
     out(r, args.flags);
+    // ledgerはrun-taskの最後に通る地点。ここでも未評価タスクを告げる
+    printHints(osDir);
     return 0;
   },
 
@@ -654,7 +685,7 @@ const COMMANDS = {
   help() {
     process.stdout.write(`autopoiesys — Intelligence OSの決定的コア
 
-環境・初期化:   doctor / init [--dir D] [--force] / version / migrate [--apply]
+環境・初期化:   doctor / init [--dir D] [--force] / skills sync [--dir D] [--check] / version / migrate [--apply]
 検証:           validate / check / rebuild
 World Model:    assert --file s.json / statement add|supersede|show / query [name] [--param k=v]
                 ingest repo|rules|memory|knowledge|all [--scope S] [--repo D] [--check]

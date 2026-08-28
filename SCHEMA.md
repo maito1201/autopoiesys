@@ -202,6 +202,12 @@ pipelineステップ（エンジン実装済みの全語彙）:
 scopeが宣言されているのにタスクに対応するdirが無い場合、`task new` は登録時にエラーになり、
 評価時に到達した場合は UNCERTAIN（reason: insufficient_evidence）を記録する。
 
+`kind`（任意・`conformance` | `outcome`）は「何を見る評価器か」を宣言する。
+`conformance` は規定への適合（枠・語彙・引用・プロセス）、`outcome` は目的の達成
+（成果物の外側の効果。例「初見の読者が指定の発見に到達できるか」）を測る。
+両者を区別しないと、適合を全通過しながら目的未達の成果物が完成扱いになる。
+`autopoiesys check` は、outcome型で裏付けられていない success_criteria を警告する。
+
 共通: `id`, `applies_to`（自由ラベル）, `tier`（T0|T1|T2|T3）, `method`
 
 ```yaml
@@ -277,6 +283,16 @@ replay（記録済みverdictのリプレイ。regressionやevaluateの--replay�
 `reason`（任意）: insufficient_evidence | model_limitation | conflicting_evidence —
 Next Action Engine が COLLECT_EVIDENCE / DEEP_RESEARCH / RESOLVE_CONFLICT へ写像する。
 
+`autopoiesys next-action` は DONE のとき `caveats` を返す: goal.yaml の
+success_criteria / constraints のうち、判定器が unbound か実在しない（MISSING）、
+または一度も実行されていない（UNVERIFIED）ものの一覧。DONEは「このタスクのevaluatorが
+全てPASS」であって「Goalが測れている」ではないため、完了報告に「この目的は現在測定不能」を
+明示させるための出力である。
+
+llm_judgeのbriefingには、そのタスクで記録済みのverdict（evaluator・verdict・provenance・
+evidence抜粋）が「OSが記録した検証実績」として同梱される。0件の場合はその旨が明記され、
+判定者は報告本文の自己申告を証跡として扱わずに済む。
+
 ## Task（tasks/tasks.jsonl の1行）
 
 `repo_dirs`（任意）は scope → 作業ディレクトリの対応。横断タスクではEvaluatorごとに
@@ -311,7 +327,7 @@ Next Action Engine が COLLECT_EVIDENCE / DEEP_RESEARCH / RESOLVE_CONFLICT へ�
 |---|---|
 | reported | symptom, source, severity, fingerprint(自動) |
 | investigated | root_cause, why_undetected |
-| classified | classification ∈ {missing_knowledge, missing_query, missing_constraint, missing_test, missing_evaluator, bad_workflow, bad_model}（実装部品指向） ∪ {incorrect_knowledge, missing_relation, missing_condition, missing_decision_model, missing_capability, wrong_architecture}（知性構造指向・CONCEPTv2 §9）。任意で refs[]（診断の参照先: StatementID・evaluator:等の型付き参照） |
+| classified | （`missing_evaluator` と分類すると `proposals/<Fid>-evaluator.yaml` に検出器の提案スタブが自動起票され、遷移イベントに `proposal_stub` が記録される。既存ファイルは上書きしない。適用は upgrade-os の承認制のまま）classification ∈ {missing_knowledge, missing_query, missing_constraint, missing_test, missing_evaluator, bad_workflow, bad_model}（実装部品指向） ∪ {incorrect_knowledge, missing_relation, missing_condition, missing_decision_model, missing_capability, wrong_architecture}（知性構造指向・CONCEPTv2 §9）。任意で refs[]（診断の参照先: StatementID・evaluator:等の型付き参照） |
 | upgrade_proposed | proposal（提案内容 or ファイルref） |
 | implemented | assets[]（最低1件の golden_task と、最低1件の evaluator/rule/query/detector）, regression_ref |
 | accepted_risk | reason, why_undetected（investigated済みで記録があれば省略可） |
@@ -385,12 +401,18 @@ goal.yamlのsuccess_criteria/constraints（evaluator接地）も同じ語彙で�
 
 ```json
 {"ts":"...","purpose":"discover-domain","tier":"T3","model":"...",
- "tokens_in":12000,"tokens_out":3000,"task":"T001","session":"R001",
+ "tokens_in":12000,"tokens_out":3000,"estimated":true,"task":"T001","session":"R001",
  "asset_refs":["queries/get_constraints.yaml"]}
 ```
 
 Skillは全LLM作業（自分自身の推論を含む）をここに自己申告する。
-`autopoiesys metrics` が cost/task・tier別消費・cheap-path coverage・切詰め率を集計する。
+`tokens_in` / `tokens_out` は任意で、入れるなら両方を指定する（片方だけの記録は集計を歪める）。
+値は実行者の手入力なので既定で `estimated: true`（見積り）が付き、API実測値を持つ場合だけ
+`ledger add --measured` で `estimated: false` になる。分からないなら入れない — 見積りを
+実測として台帳に残すと optimization のコスト判断を誤る。
+`autopoiesys metrics` が cost/task・tier別消費・cheap-path coverage・切詰め率を集計し、
+`tokens.measured` / `tokens.estimated` / `tokens.entries_without_tokens` で内訳を分ける
+（`estimated` 未設定の旧エントリは出所不明のため見積り側に数える）。
 
 ## Researchセッション（observations/research.jsonl）
 
