@@ -16,6 +16,9 @@ const ingest = require('../core/ingest');
 const scaffold = require('../core/scaffold');
 const knowledge = require('../core/knowledge');
 const gap = require('../core/gap');
+const decision = require('../core/decision');
+const routing = require('../core/routing');
+const plan = require('../core/plan');
 
 function parseArgs(argv) {
   const positional = [];
@@ -176,6 +179,7 @@ const COMMANDS = {
     const osDir = requireOsDir(args.flags);
     const sub = args.positional[0];
     const usage = '使い方: autopoiesys statement add "<body>" --type t --source s [--tags a,b] [--scope repo1,repo2] [--status fact|hypothesis|unknown] [--confidence 0.x] [--method llm|human|deterministic] [--task T001]\n' +
+      '        （--type unknown のときだけ [--blocks <塞いでいる判断・基準のID列>] [--importance 0..1]）\n' +
       '        autopoiesys statement supersede <S00xx> "<訂正後body>" --source s [--type/--tags/--status は省略時に旧Statementから継承]\n' +
       '        autopoiesys statement show <S00xx>';
     if (sub === 'show') {
@@ -201,6 +205,10 @@ const COMMANDS = {
       scope: args.flags.scope ? String(args.flags.scope).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
       confidence: args.flags.confidence !== undefined ? Number(args.flags.confidence) : undefined,
       predicate: args.flags.predicate ? String(args.flags.predicate) : undefined,
+      // type: unknown 専用。「分からない」を散文で終わらせず、
+      // 何の判断を塞いでいるか・どれだけ効くかで並べ替えられるようにする
+      blocks: args.flags.blocks ? String(args.flags.blocks).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
+      importance: args.flags.importance !== undefined ? Number(args.flags.importance) : undefined,
       source: String(args.flags.source),
       method: args.flags.method ? String(args.flags.method) : undefined,
       task: args.flags.task ? String(args.flags.task) : undefined,
@@ -462,12 +470,31 @@ const COMMANDS = {
       const id = args.positional[1];
       if (!id || !args.flags.path) throw new Error('使い方: autopoiesys task artifact <id> --path <p> [--note <n>]');
       const t = evaluate.getTask(osDir, id);
-      const artifacts = [...(t.artifacts || []), { path: String(args.flags.path), note: args.flags.note ? String(args.flags.note) : '' }];
+      // tsを残す。これが無いと「PLANを事前に固定したのか、成果を見た後に書いたのか」を
+      // 台帳から判定できず、plan-verifyは常に「判定不能」しか返せない
+      const artifacts = [...(t.artifacts || []), {
+        path: String(args.flags.path),
+        note: args.flags.note ? String(args.flags.note) : '',
+        ts: util.nowIso(),
+      }];
       evaluate.updateTask(osDir, id, { artifacts });
       out({ task: id, artifacts: artifacts.length, added: String(args.flags.path) }, args.flags);
       // 成果物登録は完了報告の直前に通る地点。ここで未評価を告げないと、
       // 評価器を呼ばないまま完成報告する経路が開いたままになる
       printHints(osDir);
+      return 0;
+    }
+    if (sub === 'plan') {
+      const id = args.positional[1];
+      if (!id || !args.flags.file) throw new Error('使い方: autopoiesys task plan <id> --file <PLANのパス>');
+      const r = plan.registerPlan(osDir, id, String(args.flags.file));
+      out(r, args.flags);
+      return 0;
+    }
+    if (sub === 'plan-verify') {
+      const id = args.positional[1];
+      if (!id) throw new Error('使い方: autopoiesys task plan-verify <id>');
+      out(plan.verifyPlans(osDir, id), args.flags);
       return 0;
     }
     if (sub === 'set-evaluators') {
@@ -477,7 +504,7 @@ const COMMANDS = {
       out({ task: id, evaluators }, args.flags);
       return 0;
     }
-    throw new Error('使い方: autopoiesys task new|list|show|note|artifact|set-evaluators');
+    throw new Error('使い方: autopoiesys task new|list|show|note|artifact|plan|plan-verify|set-evaluators');
   },
 
   evaluate(args) {
@@ -524,6 +551,72 @@ const COMMANDS = {
     if (r.caveats) shown.caveats = r.caveats;
     out(shown, args.flags);
     printHints(osDir);
+    return 0;
+  },
+
+  // 決定を「選択肢・基準・期待結果・レビュー期限」を持つ構造として残し、期限後に
+  // 結果と照合する（CONCEPT §8）。保存だけして照合しないなら、それはログである。
+  decision(args) {
+    const osDir = requireOsDir(args.flags);
+    const sub = args.positional[0];
+    const list = (v) => (v ? String(v).split(',').map((s) => s.trim()).filter(Boolean) : undefined);
+    if (sub === 'new') {
+      const body = args.positional.slice(1).join(' ');
+      if (!body) throw new Error('使い方: autopoiesys decision new "<何を決めたか>" --options a,b --chosen a --criteria c1,c2 --expected "<期待結果>" --review-after <日付|イベント> [--tags t] [--scope s] [--task <id>]');
+      const r = decision.newDecision(osDir, body, {
+        options: list(args.flags.options),
+        chosen: args.flags.chosen ? String(args.flags.chosen) : undefined,
+        criteria: list(args.flags.criteria),
+        expected_outcome: args.flags.expected ? String(args.flags.expected) : undefined,
+        review_after: args.flags['review-after'] ? String(args.flags['review-after']) : undefined,
+        tags: list(args.flags.tags),
+        scope: list(args.flags.scope),
+        source: args.flags.source ? String(args.flags.source) : undefined,
+        method: args.flags.method ? String(args.flags.method) : undefined,
+        task: args.flags.task ? String(args.flags.task) : undefined,
+      });
+      out(r, args.flags);
+      printHints(osDir);
+      return 0;
+    }
+    if (sub === 'list') {
+      out(decision.listDecisions(osDir, { due: !!args.flags.due }), args.flags);
+      return 0;
+    }
+    if (sub === 'review') {
+      out(decision.reviewSummary(osDir), args.flags);
+      return 0;
+    }
+    if (sub === 'outcome') {
+      const id = args.positional[1];
+      if (!id || !args.flags.result) throw new Error(`使い方: autopoiesys decision outcome <id> --result ${decision.OUTCOME_RESULTS.join('|')} [--note "<観測>"] [--task <id>]`);
+      const r = decision.recordOutcome(osDir, id, {
+        result: String(args.flags.result),
+        note: args.flags.note ? String(args.flags.note) : undefined,
+        source: args.flags.source ? String(args.flags.source) : undefined,
+        method: args.flags.method ? String(args.flags.method) : undefined,
+        task: args.flags.task ? String(args.flags.task) : undefined,
+      });
+      out(r, args.flags);
+      // 期待どおりにならなかった決定をログで終わらせない（§26④）
+      if (r.message) process.stdout.write('\n警告: ' + r.message + '\n');
+      printHints(osDir);
+      return 0;
+    }
+    throw new Error('使い方: autopoiesys decision new|list|review|outcome');
+  },
+
+  // config.yaml の routing 表から推奨tierを引く。宣言されているだけで誰も読まない表は
+  // 運用では守られないので、tierを自己申告ではなく表から導出する。
+  route(args) {
+    const osDir = requireOsDir(args.flags);
+    let cfg = null;
+    try { cfg = schema.loadConfig(osDir); } catch { cfg = null; }
+    const r = routing.recommendTier(cfg, {
+      purpose: args.flags.purpose ? String(args.flags.purpose) : (args.positional[0] || undefined),
+      signals: args.flags.signals ? String(args.flags.signals).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
+    });
+    out(r, args.flags);
     return 0;
   },
 
@@ -692,7 +785,11 @@ World Model:    assert --file s.json / statement add|supersede|show / query [nam
 知識源と到達性:  sources scan [--emit] / audit reachability
 Intelligence Graph: relate <s> <p> <o> "<説明>" / gap [--goal S00xx] [--assert] [--criteria-only]
 タスクと評価:   task new [--repos <scope>[=<dir>],...] |list|show|note|artifact
+                task plan T --file PLAN.md / task plan-verify T（手順の事前固定）
                 evaluate --task T / verdict --file v.json / next-action T
+判断:           decision new "..." --options a,b --chosen a --review-after D
+                decision list [--due] / decision review / decision outcome S00xx --result met|unmet|unclear
+                route --purpose <用途> [--signals s1,s2]
 Failureループ:  feedback "..." / failure list|show|transition|lint / regression
 Token Economics: ledger add / research open|close|list / compile --file f.json / metrics
 

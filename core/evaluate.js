@@ -5,12 +5,16 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { readJsonl, appendJsonl, nowIso, nextId, atomicWriteFile, readTextFile, stableStringify } = require('./util');
+const { readJsonl, appendJsonl, nowIso, nextId, atomicWriteFile, readTextFile, stableStringify, estimateTokens } = require('./util');
 const { parseYaml } = require('./yaml');
 const { runQuery } = require('./query');
+const { buildReasoningContext } = require('./context');
 
 const VERDICTS = ['PASS', 'FAIL', 'UNCERTAIN'];
-const REASONS = ['insufficient_evidence', 'model_limitation', 'conflicting_evidence'];
+// insufficient_sample: 「やり方を変えれば届く」証拠不足（insufficient_evidence）と、
+// 「入力そのものが足りず原理的に届かない」検出力不足を区別する。混ぜると、
+// 標本を増やすべき場面で手法の作り直しを繰り返す（E3 / kabu core-underpowered-goal-state）。
+const REASONS = ['insufficient_evidence', 'insufficient_sample', 'model_limitation', 'conflicting_evidence'];
 const METHODS = ['deterministic', 'command', 'llm_judge'];
 // 何を見る評価器か。conformance=規定への適合（枠・語彙・引用・プロセス）、
 // outcome=目的の達成（外側の効果）。両者を区別しないと、適合だけを全通過して
@@ -276,7 +280,61 @@ function recordedVerificationSection(osDir, task, def) {
   return parts;
 }
 
-function prepareLlmJudge(osDir, def, { task, artifacts }) {
+// 実装として扱う拡張子。llm_judgeに文書だけを渡すと、判定者は「作業そのもの」ではなく
+// 「作業についての文章」を読むことになり、実装の欠陥は原理的に検出できない
+// （報告の内部整合はすべて通ってしまう）。この分類はその穴を可視化するためにある。
+const IMPLEMENTATION_EXTS = new Set([
+  '.py', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.java', '.kt', '.rb', '.go',
+  '.rs', '.c', '.h', '.cc', '.cpp', '.hpp', '.cs', '.php', '.swift', '.scala', '.m',
+  '.sh', '.bash', '.ps1', '.sql', '.r', '.jl', '.ipynb',
+]);
+
+function looksLikeImplementation(p) {
+  return IMPLEMENTATION_EXTS.has(path.extname(String(p)).toLowerCase());
+}
+
+function dirHasImplementation(dir, depth = 3) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  for (const e of entries) {
+    if (e.name.startsWith('.') || e.name === 'node_modules') continue;
+    if (e.isFile() && looksLikeImplementation(e.name)) return true;
+    if (e.isDirectory() && depth > 0 && dirHasImplementation(path.join(dir, e.name), depth - 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// タスクのartifactに実装が含まれるか。相対パスは repo_dirs → work_dir → .os の親 の順に解決する。
+function artifactsIncludeImplementation(osDir, task) {
+  const bases = [];
+  for (const d of Object.values((task && task.repo_dirs) || {})) bases.push(d);
+  if (task && task.work_dir) bases.push(task.work_dir);
+  bases.push(path.dirname(osDir));
+  for (const a of (task && task.artifacts) || []) {
+    const p = String((a && a.path) || '');
+    if (!p) continue;
+    if (looksLikeImplementation(p)) return true;
+    const candidates = path.isAbsolute(p) ? [p] : bases.map((b) => path.resolve(b, p));
+    for (const full of candidates) {
+      try {
+        if (fs.statSync(full).isDirectory() && dirHasImplementation(full)) return true;
+      } catch {
+        // 存在しないパスは無視する（artifactの実在検査はここの責務ではない）
+      }
+    }
+  }
+  return false;
+}
+
+// fullContext: 旧方式（context_queriesの結果全文をJSONで埋め込む）。A/B実験のbaseline用に残す。
+// 既定は buildReasoningContext による最小Subgraph（CONCEPTv2 §8）。
+function prepareLlmJudge(osDir, def, { task, artifacts, fullContext = false } = {}) {
   const parts = [];
   parts.push(`# 独立評価依頼: ${def.id}`);
   parts.push('');
@@ -290,25 +348,56 @@ function prepareLlmJudge(osDir, def, { task, artifacts }) {
   for (const a of task.artifacts || []) parts.push(`- ${a.path}${a.note ? ` — ${a.note}` : ''}`);
   if (artifacts && artifacts.length) for (const a of artifacts) parts.push(`- ${a}`);
   parts.push('');
+  // 実装が評価に渡っているかを明示する。渡っていないことを知らせないと、判定者は
+  // 文書だけを読んでPASSを出し、実装の欠陥はどの評価器も検出しないまま完了扱いになる。
+  if (artifactsIncludeImplementation(osDir, task)) {
+    parts.push('**このArtifactには実装が含まれる。報告の記述を証拠として採らず、');
+    parts.push('主張が実装と一致しているかを実物のコードで確かめること。**');
+  } else {
+    parts.push('**注意: このArtifactには実装（ソースコード）が含まれていない。**');
+    parts.push('したがって、実装が主張どおりかをこのbriefingから検証することはできない。');
+    parts.push('実装の正しさに依存するrubric項目は、PASSではなく');
+    parts.push('UNCERTAIN（reason: insufficient_evidence）とすること。');
+  }
+  parts.push('');
   // 報告の「検証しました」は自己申告であり、それ自体は証跡にならない。
   // OSが機械記録したverdictを判定材料として同梱し、申告と記録の突合を可能にする（c-001）。
   parts.push(...recordedVerificationSection(osDir, task, def));
+  // 事前固定した手順が結果を見た後に変わっていないか（B2）。plan.jsはgetTaskのために
+  // このモジュールを参照するので、循環を避けて呼ぶ時点でrequireする。
+  parts.push(...require('./plan').plansSection(osDir, task.id));
   // context_queriesは常に空paramsで呼ばれていたため、横断タスクでも絞り込みが効かなかった。
   // タスクの対象リポジトリをscopeとして渡す（カンマ区切りはOR = 触る全リポジトリの和集合）。
   const queryParams = {};
   const taskScopes = Object.keys(task.repo_dirs || {});
   if (taskScopes.length) queryParams.scope = taskScopes.join(',');
-  for (const q of def.context_queries || []) {
-    parts.push(`## Query: ${q}${taskScopes.length ? `（scope=${queryParams.scope}）` : ''}`);
-    try {
-      const res = runQuery(osDir, q, queryParams);
-      parts.push('```json');
-      parts.push(JSON.stringify(res, null, 1));
-      parts.push('```');
-    } catch (e) {
-      parts.push(`(Query実行エラー: ${e.message})`);
+  if (fullContext) {
+    for (const q of def.context_queries || []) {
+      parts.push(`## Query: ${q}${taskScopes.length ? `（scope=${queryParams.scope}）` : ''}`);
+      try {
+        const res = runQuery(osDir, q, queryParams);
+        parts.push('```json');
+        parts.push(JSON.stringify(res, null, 1));
+        parts.push('```');
+      } catch (e) {
+        parts.push(`(Query実行エラー: ${e.message})`);
+      }
+      parts.push('');
     }
-    parts.push('');
+  } else {
+    // 最小Subgraphだけを渡す。無関係なStatementを大量に混ぜると、判定者は
+    // 「関係ありそうな記述」を探して読むことになり、rubricへの集中が落ちる（§8）
+    const ctx = buildReasoningContext(osDir, {
+      task,
+      evaluator: def,
+      // evaluatorごとの予算上書き（不正値は黙って既定に戻す。文字列が混ざったまま
+      // 比較に使うと切り詰めが静かに壊れる）
+      maxTokens: typeof def.context_max_tokens === 'number' && def.context_max_tokens > 0
+        ? def.context_max_tokens
+        : undefined,
+      queryParams,
+    });
+    parts.push(...ctx.lines);
   }
   parts.push('## Rubric');
   parts.push(def.rubric);
@@ -326,12 +415,22 @@ function prepareLlmJudge(osDir, def, { task, artifacts }) {
     verdict: 'PASS | FAIL | UNCERTAIN',
     evidence: ['根拠となる観測（ファイルパス・行・Query結果）を必ず列挙'],
     rationale: '判定理由',
-    reason: '(UNCERTAINの場合) insufficient_evidence | model_limitation | conflicting_evidence',
+    reason: '(判定できない/届かない場合) insufficient_evidence | insufficient_sample | model_limitation | conflicting_evidence',
     tokens: 0,
   }, null, 1));
   parts.push('```');
   const file = path.join(osDir, 'briefings', `eval-${task.id}-${def.id}.md`);
-  atomicWriteFile(file, parts.join('\n') + '\n');
+  const text = parts.join('\n') + '\n';
+  atomicWriteFile(file, text);
+  // コンテキスト消費の実測（A1）。Token Ledgerの自己申告と違い、これは実際に生成した
+  // briefingの大きさなので、Context削減の主張をここだけで検証できる。
+  appendJsonl(path.join(osDir, 'observations', 'context_log.jsonl'), {
+    ts: nowIso(),
+    kind: 'briefing',
+    task: task.id,
+    evaluator: def.id,
+    tokens_est: estimateTokens(text),
+  });
   return file;
 }
 
@@ -542,6 +641,57 @@ function latestDeterministicVerdicts(osDir, taskId) {
   return latest;
 }
 
+// evaluatorごとのverdict履歴（記録順）。「同じevaluatorが2回続けてUNCERTAIN」
+// 「PASS→FAIL→PASSと揺れている」のような、最新1件では見えない状態を判定するために使う。
+function verdictHistory(osDir, taskId) {
+  const hist = {};
+  for (const r of readJsonl(verdictLog(osDir))) {
+    if (r.task !== taskId) continue;
+    (hist[r.evaluator] = hist[r.evaluator] || []).push(r);
+  }
+  return hist;
+}
+
+// escalation シグナルの検出（B3）。config.routing.escalation は宣言されているだけで
+// どのコードも読んでいなかった。next-action が実際に読むことで、
+// 「いつ高いモデルに逃がすか」が自己申告ではなく記録から決まるようになる。
+function escalationSignals(osDir, taskId, hist) {
+  const signals = [];
+  const evidence = [];
+  for (const [evId, rows] of Object.entries(hist).sort()) {
+    const last2 = rows.slice(-2);
+    if (last2.length === 2 && last2.every((r) => r.verdict === 'UNCERTAIN')) {
+      signals.push('uncertain_verdict');
+      evidence.push(`${evId}: UNCERTAINが2回連続（${last2.map((r) => r.ts).join(' → ')}）`);
+    }
+    // 同じ対象を同じ評価器が見て判定が往復しているなら、どちらかの判定が誤っている。
+    // 最新のPASSをそのまま採ると、覆った理由を調べないまま完了になる。
+    const seq = rows.map((r) => r.verdict).filter((v) => v !== 'UNCERTAIN');
+    for (let i = 2; i < seq.length; i++) {
+      if (seq[i] === seq[i - 2] && seq[i] !== seq[i - 1]) {
+        signals.push('conflicting_evidence');
+        evidence.push(`${evId}: 判定が往復している（${seq.join(' → ')}）`);
+        break;
+      }
+    }
+  }
+  // 直近のfeedbackが既知パターンに当たらない＝過去の資産では説明できない失敗。
+  // 台帳には照合結果を保存していないので、報告時と同じ規則で引き直す
+  // （同じfingerprintで implemented まで到達したFailureが存在するか）。
+  const byId = require('./failure').loadFailures(osDir);
+  const solved = new Set(Object.values(byId)
+    .filter((f) => f.state === 'implemented').map((f) => f.fingerprint).filter(Boolean));
+  const open = Object.values(byId)
+    .filter((f) => f.task === taskId && !['implemented', 'accepted_risk'].includes(f.state))
+    .sort((a, b) => (a.reported_ts || a.ts) < (b.reported_ts || b.ts) ? -1 : 1);
+  const lastF = open[open.length - 1];
+  if (lastF && !solved.has(lastF.fingerprint)) {
+    signals.push('unknown_fingerprint');
+    evidence.push(`${lastF.id}: 未知のfingerprint（対策済みのFailureに同じ症状が無い）`);
+  }
+  return { signals: [...new Set(signals)], evidence };
+}
+
 // Next Action Engine（設計原則§11）。決定的FAILはLLM判定で覆せない。
 // 対象evaluatorは task.evaluators と verdict記録済みevaluatorの和集合 —
 // 評価後にevaluatorを外しても、記録済みFAILは視界から消えない。
@@ -549,6 +699,7 @@ function nextAction(osDir, taskId) {
   const task = getTask(osDir, taskId);
   const latest = latestVerdicts(osDir, taskId);
   const latestDet = latestDeterministicVerdicts(osDir, taskId);
+  const hist = verdictHistory(osDir, taskId);
   const evaluators = [...new Set([...(task.evaluators || []), ...Object.keys(latest)])];
   const detail = [];
   const missing = [];
@@ -558,9 +709,13 @@ function nextAction(osDir, taskId) {
   }
   let action;
   let why;
-  const detFail = Object.values(latestDet).find((v) => v.verdict === 'FAIL')
-    || detail.find((v) => v.provenance === 'deterministic' && v.verdict === 'FAIL');
-  const anyFail = detail.find((v) => v.verdict === 'FAIL');
+  // insufficient_sample =「やり方を変えれば届く」ではなく「入力が足りず原理的に届かない」。
+  // FIX（直せ）と写すと、直しようのないものを直させ続けることになる（E3）。
+  const underpowered = detail.find((v) => v.reason === 'insufficient_sample');
+  const isReal = (v) => v.verdict === 'FAIL' && v.reason !== 'insufficient_sample';
+  const detFail = Object.values(latestDet).find(isReal)
+    || detail.find((v) => v.provenance === 'deterministic' && isReal(v));
+  const anyFail = detail.find(isReal);
   const modelLimit = detail.find((v) => v.reason === 'model_limitation');
   const conflict = detail.find((v) => v.reason === 'conflicting_evidence');
   const insufficient = detail.find((v) => v.reason === 'insufficient_evidence');
@@ -574,6 +729,9 @@ function nextAction(osDir, taskId) {
   } else if (missing.length) {
     action = 'COLLECT_EVIDENCE';
     why = `verdict未記録のevaluator: ${missing.join(', ')}`;
+  } else if (underpowered) {
+    action = 'COLLECT_EVIDENCE';
+    why = `検出力不足: ${underpowered.evaluator}（現在の入力では原理的に届かない。手法の作り直しではなく、標本・観測の追加が要る）`;
   } else if (conflict) {
     action = 'RESOLVE_CONFLICT';
     why = `矛盾する証拠: ${conflict.evaluator}`;
@@ -593,9 +751,38 @@ function nextAction(osDir, taskId) {
     action = 'COLLECT_EVIDENCE';
     why = 'verdictが1件もない';
   }
+  // escalation（B3）。DONEには昇格をかけない — 全PASSの状態から「もっと高いモデルで
+  // 見直せ」と言うのは、記録ではなく不安に基づく指示になる。
+  const esc = escalationSignals(osDir, taskId, hist);
+  let escalation = null;
+  if (esc.signals.length) {
+    let cfg = null;
+    try { cfg = require('./schema').loadConfig(osDir); } catch { cfg = null; }
+    const rec = require('./routing').recommendTier(cfg, { purpose: 'next-action', signals: esc.signals });
+    escalation = { signals: esc.signals, evidence: esc.evidence, tier: rec.tier, model: rec.model, why: rec.reason };
+  }
+  // FIXは昇格で上書きしない（直すべきFAILを昇格で覆い隠すと、欠陥が視界から消える）。
+  // 判定の往復だけはDONEも上書きする — 同じ評価器がPASS→FAIL→PASSと動いたなら、
+  // どちらかの判定が誤っている。最新のPASSを採ると、覆った理由を調べずに完了になる。
+  if (escalation && action !== 'FIX') {
+    if (esc.signals.includes('conflicting_evidence')) {
+      action = 'RESOLVE_CONFLICT';
+      why = `判定が往復している: ${esc.evidence.filter((e) => e.includes('往復')).join(' / ')}`;
+    } else if (action === 'DONE') {
+      // 全PASSの状態から「もっと高いモデルで見直せ」と言うのは、記録ではなく不安に基づく指示
+    } else if (esc.signals.includes('uncertain_verdict')) {
+      action = 'DEEP_RESEARCH';
+      why = `同じevaluatorがUNCERTAINを繰り返している: ${esc.evidence.filter((e) => e.includes('UNCERTAIN')).join(' / ')}`;
+    } else if (action === 'INVESTIGATE' || esc.signals.includes('unknown_fingerprint')) {
+      action = 'INVESTIGATE';
+      escalation.escalate = true;
+      why = `${why}（未知のfingerprintのFailureが未消化: ${esc.evidence.filter((e) => e.includes('fingerprint')).join(' / ')}）`;
+    }
+  }
   // statusは常に最新のactionに従う（一度doneでも新たなFAILでopenに戻る）
   updateTask(osDir, taskId, { status: action === 'DONE' ? 'done' : 'open', last_action: action });
   const result = { task: taskId, action, why, verdicts: detail, missing };
+  if (escalation) result.escalation = escalation;
   // DONEは「このタスクのevaluatorが全てPASS」であって「Goalが測れている」ではない。
   // 接地していない成功基準・制約をcaveatsとして必ず添え、完了報告に明示させる。
   if (action === 'DONE') {
@@ -628,6 +815,7 @@ module.exports = {
   runDeterministic,
   runCommand,
   prepareLlmJudge,
+  artifactsIncludeImplementation,
   recordVerdict,
   loadTasks,
   getTask,

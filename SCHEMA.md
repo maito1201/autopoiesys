@@ -33,10 +33,11 @@ Core はここに定義された形式以外を読み書きしない。`.os/` �
 | evaluations/log.jsonl | JSONL | verdict台帳 |
 | failures/ledger.jsonl | JSONL | Failure状態機械イベント |
 | golden_tasks/*.yaml | YAML | Golden Task定義 |
-| briefings/*.md | MD | T3投入用の厳選コンテキスト（git監査対象） |
+| briefings/*.md | MD | T3投入用の厳選コンテキスト（git監査対象）。llm_judge用のbriefingには**artifactに実装が含まれるか**が明記され、含まれない場合は判定者に「実装に依存するrubric項目はUNCERTAIN」と指示される |
 | proposals/ | MD/diff | OSS Core等への変更提案の下書き |
 | plugins/*.yaml | YAML | 逃げ道プラグイン宣言（**未実装** — Core側の実行・台帳記録の受け皿は将来版。現状はproposals/への還流を使う） |
-| observations/costs.jsonl | JSONL | Token Ledger |
+| observations/costs.jsonl | JSONL | Token Ledger（**自己申告**） |
+| observations/context_log.jsonl | JSONL | briefing生成時のコンテキスト消費（**機械実測**。自己申告と違い、削減の主張をここだけで検証できる） |
 | observations/query_log.jsonl | JSONL | Query実行記録（切詰め・頻度） |
 | observations/research.jsonl | JSONL | Researchセッション開閉と産出資産 |
 | observations/regression.jsonl | JSONL | regression実行履歴（運用ヒント「そろそろregression」の判定基準） |
@@ -113,6 +114,18 @@ vendor / node_modules / Pods / dist 等の他人の規約は対象外）。
   どちらのscopeで引いても返る。**省略は「宛先に依らない知識」**（製品仕様・ビジネス構造等）を
   意味し、scope絞りのQueryには乗らない代わりに話題tagで引ける。
   値は `world_model/vocabulary.yaml` の `scopes` が登録簿（未登録はcheckで全件警告）
+- `blocks` / `importance`: **type: unknown でのみ使える**。`blocks` は
+  「このUnknownが塞いでいる判断・基準のID」の文字列配列（判断・台帳など別空間のIDも
+  入りうるため実在は検証しない）、`importance` は 0..1。
+  Unknownを「知らないことの一覧」で終わらせず、**どの判断が止まっているか**で
+  並べ替えられるようにするためのもの
+- `decision` 型の任意フィールド: `options`（検討した選択肢）・`chosen`（採った手。
+  optionsを列挙したなら必ずその中の1つ）・`criteria`（判断基準）・`expected_outcome`・
+  `review_after`（日付 or イベント名。日付として読める場合だけ期限切れ判定の対象になる）
+- `outcome` 型の任意フィールド: `result`（met | unmet | unclear）・`note`・`decision`（元の決定ID）。
+  レビューは元のdecisionを**supersedeせず**、outcomeを追記して `links[].derived_from` で張る
+  （決定の記録そのものは書き換えない）。`result: unmet` は
+  「ログで終わらせずFailureとして起票せよ」という警告を伴う
 - 必須: id, ts, type, body, status, provenance
 
 ## Relation（type: relationship のStatement — 第一級の関係）
@@ -280,8 +293,29 @@ rubric: |
 human（人間の判定。外部記録で明示指定した場合のみ）|
 replay（記録済みverdictのリプレイ。regressionやevaluateの--replayで使われる。
 `autopoiesys evaluate --replay` は過去に記録されたllm/human判定と一致する値のみ受理する）。
-`reason`（任意）: insufficient_evidence | model_limitation | conflicting_evidence —
-Next Action Engine が COLLECT_EVIDENCE / DEEP_RESEARCH / RESOLVE_CONFLICT へ写像する。
+`reason`（任意）: insufficient_evidence | insufficient_sample | model_limitation |
+conflicting_evidence — Next Action Engine が COLLECT_EVIDENCE / COLLECT_EVIDENCE /
+DEEP_RESEARCH / RESOLVE_CONFLICT へ写像する。
+
+`insufficient_sample` は `insufficient_evidence` と区別して使う。前者は
+**入力そのものが足りず、やり方を変えても現在のデータでは原理的に届かない**状態、
+後者は**証拠が集まっていないだけ**の状態である。混ぜると、直しようのないものを
+FIX（直せ）と指示し続けることになる。FAILに付けても FIX へは写さないが、
+`insufficient_sample` を持たない他のFAILがあればそちらのFIXが優先される
+（検出力不足の申告で本物の欠陥を覆い隠さないため）。
+
+`autopoiesys next-action` は、記録から次のシグナルを検出すると `escalation`
+（signals / evidence / tier / model / why）を返す。tierは自己申告ではなく
+config.yaml の `routing` 表から引く:
+
+| シグナル | 検出条件 | actionへの反映 |
+|---|---|---|
+| uncertain_verdict | 同一evaluatorのUNCERTAINが2回連続 | DEEP_RESEARCH へ昇格（同じ強さで調べ直しても解けなかった記録） |
+| conflicting_evidence | 同一evaluatorの判定が往復（PASS→FAIL→PASS） | RESOLVE_CONFLICT へ。**DONEも上書きする** — 最新のPASSを採ると覆った理由を調べずに完了になる |
+| unknown_fingerprint | このタスクの未消化Failureが、対策済みFailureのどれとも症状が一致しない | INVESTIGATE に `escalate: true` |
+
+FIX は昇格で上書きしない（直すべきFAILを覆い隠すと欠陥が視界から消える）。
+全PASSのDONEも、conflicting_evidence 以外では上書きしない。
 
 `autopoiesys next-action` は DONE のとき `caveats` を返す: goal.yaml の
 success_criteria / constraints のうち、判定器が unbound か実在しない（MISSING）、
@@ -311,7 +345,26 @@ evidence抜粋）が「OSが記録した検証実績」として同梱される�
 `evaluators`: このタスクに適用するEvaluator ID列。
 `work_dir`（任意）: command/deterministic evaluator実行ディレクトリの既定値（`evaluate --work-dir` が上書き）。
 `refs` / `context`（任意）: Issue/PR URL等の参照と自由記述の作業文脈。
+`artifacts`: llm_judgeが読めるのはここに登録されたファイルだけである。
+**実装（ソースコード）を登録せず文書だけを登録すると、判定者は「作業そのもの」ではなく
+「作業についての文章」を判定することになり、実装の欠陥はどの評価器も検出できない。**
+コアはこの状態を運用ヒントで警告し、briefingにも実装の有無を明記する。
+`artifacts[].ts`: 登録時刻。PLANの登録との前後関係を判定するために残す。
 `notes`（任意）: `task note` によるチェックポイント列。継続性の正本を会話でなく台帳に置くためのもの。
+`plans`（任意）: 事前固定した検証手順（PLAN）のハッシュ履歴。追記専用で上書きしない。
+
+```json
+"plans":[{"ts":"2026-08-29T12:00:00Z","path":"PLAN.md","hash":"<sha256hex>"}]
+```
+
+`path` は work_dir → repo_dirs → .os の親 の順で解決した相対パス（区切りは `/`）。
+`hash` は **BOM除去・CRLF→LF正規化したテキスト**のSHA-256（保存し直しだけで偽の変更警告を
+出さないため。`sha256sum` コマンドの値とは一致しない）。
+`task plan-verify <id>` が登録時のハッシュと現在のファイルを照合し、
+`changed: null` は「照合不能」（ファイルが見つからない）を意味する。
+**PLANが変更されたこと自体は違反ではない**（計画の更新は正当でありうる）。
+コアが提供するのは「変更された事実」と「その前後関係が記録から判定できるか」だけで、
+妥当性は判定しない。llm_judgeのbriefingにはこの照合結果が節として載る。
 
 ## Failure（failures/ledger.jsonl の1行 = 状態遷移イベント）
 
@@ -329,6 +382,7 @@ evidence抜粋）が「OSが記録した検証実績」として同梱される�
 | investigated | root_cause, why_undetected |
 | classified | （`missing_evaluator` と分類すると `proposals/<Fid>-evaluator.yaml` に検出器の提案スタブが自動起票され、遷移イベントに `proposal_stub` が記録される。既存ファイルは上書きしない。適用は upgrade-os の承認制のまま）classification ∈ {missing_knowledge, missing_query, missing_constraint, missing_test, missing_evaluator, bad_workflow, bad_model}（実装部品指向） ∪ {incorrect_knowledge, missing_relation, missing_condition, missing_decision_model, missing_capability, wrong_architecture}（知性構造指向・CONCEPTv2 §9）。任意で refs[]（診断の参照先: StatementID・evaluator:等の型付き参照） |
 | upgrade_proposed | proposal（提案内容 or ファイルref） |
+| upgrade_proposed → upgrade_proposed | proposal, **supersedes_reason**（前の提案のどこが誤りだったか）。誤った提案を黙って差し替える経路を塞ぐための自己遷移 — 提案を撤回するには、撤回の理由を台帳に残す以外の方法が無い |
 | implemented | assets[]（最低1件の golden_task と、最低1件の evaluator/rule/query/detector）, regression_ref |
 | accepted_risk | reason, why_undetected（investigated済みで記録があれば省略可） |
 
@@ -413,6 +467,18 @@ Skillは全LLM作業（自分自身の推論を含む）をここに自己申告
 `autopoiesys metrics` が cost/task・tier別消費・cheap-path coverage・切詰め率を集計し、
 `tokens.measured` / `tokens.estimated` / `tokens.entries_without_tokens` で内訳を分ける
 （`estimated` 未設定の旧エントリは出所不明のため見積り側に数える）。
+
+## Context Log（observations/context_log.jsonl の1行）
+
+```json
+{"ts":"...","kind":"briefing","task":"T001","evaluator":"requirement_satisfied","tokens_est":1656}
+```
+
+Token Ledgerが実行者の自己申告であるのに対し、こちらは**コアが生成物から直接測った実測値**である。
+briefingを書き出すたびに1行追記される（`tokens_est` は生成したbriefing本文の推定トークン数）。
+`autopoiesys metrics` の `context.briefing_tokens_total` / `context.query_tokens_total` /
+`context.per_task` がこれを集計する。「Reasoning Contextでトークンが減った」という主張は、
+自己申告ではなくこの列どうしを比べて検証する。
 
 ## Researchセッション（observations/research.jsonl）
 

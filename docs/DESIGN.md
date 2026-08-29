@@ -71,6 +71,12 @@ Unknown率としてメトリクスに載る。ドメイン固有性はキーで�
 - predicate / tag 語彙は `vocabulary.yaml` 登録制。**初期は警告のみ、実績で安定した語彙から
   strict化する段階運用**（§26⑥「実績から進化」を語彙管理自体に適用）
 
+**Decision Model は専用の保存層を持たない。** 決定は `type: decision` の Statement に
+`options` / `chosen` / `criteria` / `expected_outcome` / `review_after` を載せて追記し、
+レビュー結果は元をsupersedeせず `type: outcome` を追記して `derived_from` で張る
+（決定の記録そのものは書き換えない）。期限切れは運用ヒントが催促し、`result: unmet` は
+Failureループへの起票を促す。「保存して終わる」なら、それは知識ではなくログである（§26④）。
+
 - 代替案: 型ごとのSQLiteテーブル（語彙進化のたびにマイグレーション、§26⑥に反する。
   node:sqliteは22.5+のみで下限も上がる）/ 純RDFトリプル（confidence・counter_evidenceの
   一級表現を失い「単なるKnowledge Graph」に戻る）/ LLM自由スキーマ（決定的検証・再生が不能）。
@@ -125,6 +131,12 @@ provenance刻印により回帰テストではllm_judgeを記録済み判定の�
 Next Action Engine（`autopoiesys next-action <task>`）が§11の決定表を引く:
 PASS→DONE / FAIL→FIX / UNCERTAIN→INVESTIGATE / 証拠不足→COLLECT_EVIDENCE /
 モデル限界→DEEP_RESEARCH / 矛盾→RESOLVE_CONFLICT。
+検出力不足（`reason: insufficient_sample`）はFAILであってもFIXへは写さずCOLLECT_EVIDENCEへ送る
+——「やり方を変えれば届く」と「入力が足りず原理的に届かない」を混ぜると、
+直しようのないものを直させ続けることになる。
+さらに記録から escalation シグナル（同一evaluatorのUNCERTAIN2回連続 / 判定の往復 /
+未消化の未知fingerprint）を検出し、昇格先のtierを config.yaml の routing 表から引く。
+判定の往復だけは全PASSのDONEも上書きする（最新のPASSを採ると、覆った理由を調べずに完了になる）。
 **Agentの「完了しました」はどのコードパスでも使われない（§26③）。**
 DONEには `caveats`（判定器が無い・一度も実行されていない success_criteria / constraints）が
 添えられる。**DONEは「このタスクのevaluatorが全てPASS」であって「Goalが測れている」ではない**ため、
@@ -314,7 +326,7 @@ autopoiesys/                  # OSS Core（ドメイン知識ゼロ）
 ├── tasks/tasks.jsonl  evaluations/log.jsonl
 ├── failures/ledger.jsonl  golden_tasks/*.yaml
 ├── briefings/  proposals/  plugins/
-└── observations/{costs.jsonl, query_log.jsonl, research.jsonl}
+└── observations/{costs.jsonl, context_log.jsonl, query_log.jsonl, research.jsonl}
 ```
 
 ## 主要リスクと緩和

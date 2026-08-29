@@ -23,7 +23,9 @@ const LEGAL_TRANSITIONS = {
   reported: ['investigated', 'accepted_risk'],
   investigated: ['classified', 'accepted_risk'],
   classified: ['upgrade_proposed', 'accepted_risk'],
-  upgrade_proposed: ['implemented', 'accepted_risk'],
+  // 自己遷移は「提案の差し替え」。誤った提案を撤回できず別Failureとして起票する
+  // 回り道を塞ぐ（supersedes_reason 必須。台帳は追記専用なので前の提案行は残る）。
+  upgrade_proposed: ['upgrade_proposed', 'implemented', 'accepted_risk'],
 };
 const DETECTOR_KINDS = ['evaluator', 'rule', 'query', 'detector'];
 
@@ -83,6 +85,11 @@ function transition(osDir, id, to, fields = {}) {
     }
   } else if (to === 'upgrade_proposed') {
     if (!fields.proposal) errors.push('proposal必須（提案内容またはファイルref）');
+    // 差し替え（提案のやり直し）は、前の提案を破棄する理由の明示を条件にする。
+    // これが無いと「黙って提案を上書きする」経路になり、判断の履歴が読めなくなる。
+    if (cur.state === 'upgrade_proposed' && !fields.supersedes_reason) {
+      errors.push('supersedes_reason必須（前の提案を破棄する理由。提案の差し替えには明示が要る）');
+    }
   } else if (to === 'implemented') {
     const assets = fields.assets;
     if (!Array.isArray(assets) || assets.length === 0) {

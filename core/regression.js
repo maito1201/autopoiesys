@@ -4,7 +4,10 @@
 // fixture付きcheckは検出力テスト（既知の悪い状態に対して検出器が実際にFAILを出せるか）。
 const path = require('node:path');
 const fs = require('node:fs');
-const { loadEvaluatorDef, runDeterministic, runCommand, loadTasks, latestVerdicts } = require('./evaluate');
+const {
+  loadEvaluatorDef, runDeterministic, runCommand, loadTasks, latestVerdicts,
+  artifactsIncludeImplementation,
+} = require('./evaluate');
 const { listGoldenTasks, checkAll, loadConfig } = require('./schema');
 const { readJsonl, appendJsonl, nowIso } = require('./util');
 const { loadFailures, TERMINAL } = require('./failure');
@@ -143,6 +146,35 @@ function openTasksWithoutVerdicts(osDir) {
   return rows;
 }
 
+// 実装を作ったのに、評価にはその文書だけを渡しているタスク。
+// llm_judgeは渡されたartifactしか読めないので、文書だけを渡すと判定者は
+// 「作業そのもの」ではなく「作業についての文章」を見ることになり、
+// 実装の欠陥はどの評価器も検出できないまま完了扱いになる。
+function openTasksJudgingProseOnly(osDir) {
+  const rows = [];
+  let tasks;
+  try {
+    tasks = loadTasks(osDir);
+  } catch {
+    return rows;
+  }
+  for (const t of Object.values(tasks)) {
+    if (t.status && t.status !== 'open') continue;
+    if (!(t.artifacts || []).length) continue;      // 未登録は「評価が未実行」側で拾う
+    const judges = (t.evaluators || []).filter((id) => {
+      try {
+        return loadEvaluatorDef(osDir, id).method === 'llm_judge';
+      } catch {
+        return false;
+      }
+    });
+    if (!judges.length) continue;
+    if (artifactsIncludeImplementation(osDir, t)) continue;
+    rows.push({ id: t.id, judges });
+  }
+  return rows;
+}
+
 // 普段のコマンド実行のついでに出す運用ヒント。マニュアルを読まないユーザーに
 // 「そろそろregression」「評価が未実行」を届けるための決定的チェック（LLMゼロ）。
 function maintenanceHints(osDir, { now } = {}) {
@@ -172,11 +204,30 @@ function maintenanceHints(osDir, { now } = {}) {
 
   // 未評価のまま開いているタスク。評価器を呼ばずに完了報告できてしまう穴を、
   // 報告の文面ではなくCLI出力（Skillが中継を義務づけられている経路）で塞ぐ。
+  for (const t of openTasksJudgingProseOnly(osDir)) {
+    hints.push(
+      `警告: ${t.id} のartifactに実装（ソースコード）が1件も無い。` +
+      `llm_judge（${t.judges.join(', ')}）は渡されたファイルしか読めないので、` +
+      '実装の欠陥はどの評価器も検出できない。' +
+      `実装を node cli/index.js task artifact ${t.id} --path <実装のパス> で登録すること`
+    );
+  }
+
   for (const t of openTasksWithoutVerdicts(osDir)) {
     hints.push(
       `警告: ${t.id} の評価が未実行（未記録のevaluator: ${t.missing.join(', ')}）。` +
       `完了報告の前に node cli/index.js evaluate --task ${t.id} → next-action ${t.id} を実行すること`
     );
+  }
+
+  // レビュー期限を過ぎた決定（C1）。決定を記録しただけで結果と照合しないなら、
+  // それは「保存して終わる」のと同じでループが閉じない（§26④）。
+  try {
+    for (const h of require('./decision').reviewSummary(osDir, { now }).hints) {
+      hints.push(`ヒント: ${h}`);
+    }
+  } catch {
+    // World Modelが未整備でも主機能を止めない
   }
 
   for (const f of Object.values(loadFailures(osDir))) {

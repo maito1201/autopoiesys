@@ -145,6 +145,24 @@ function validateStatement(st, { knownIds, vocab, used, strict, assetCheck }) {
       }
     }
   }
+  // unknown = 第一級のUnknown（CONCEPTv2 §13）。「分からない」を body の散文で終わらせず、
+  // 何の判断を塞いでいるか（blocks）と、どれだけ効くか（importance）を構造で持たせる。
+  // blocks に書かれたIDの実在は検証しない（判断・基準・台帳など別空間のIDが入りうる）。
+  if (st.blocks !== undefined) {
+    if (st.type !== 'unknown') {
+      errors.push(`${label}: blocksは type: unknown でのみ使える`);
+    } else if (!Array.isArray(st.blocks) || st.blocks.some((b) => typeof b !== 'string' || b === '')) {
+      errors.push(`${label}: blocksは文字列の配列（このUnknownが塞いでいる判断・基準のID列）`);
+    }
+  }
+  if (st.importance !== undefined) {
+    if (st.type !== 'unknown') {
+      errors.push(`${label}: importanceは type: unknown でのみ使える`);
+    } else if (typeof st.importance !== 'number' || Number.isNaN(st.importance)
+        || st.importance < 0 || st.importance > 1) {
+      errors.push(`${label}: importanceは0..1の数値`);
+    }
+  }
   for (const f of ['conditions', 'exceptions']) {
     if (st[f] !== undefined && (!Array.isArray(st[f]) || st[f].some((c) => typeof c !== 'string'))) {
       errors.push(`${label}: ${f}は文字列の配列`);
@@ -250,7 +268,9 @@ function recordStatement(osDir, fields) {
   }
   const type = fields.type || base.type;
   if (!type) throw new Error('--typeが必要（supersede時は旧Statementから継承される）');
-  const status = fields.status || base.status || 'fact';
+  // type: unknown を status: fact で記録するのは語義矛盾（「分からないことが事実」）。
+  // 既定を型から決め、Unknownが事実として索引に載るのを防ぐ。
+  const status = fields.status || base.status || (type === 'unknown' ? 'unknown' : 'fact');
   if (status === 'hypothesis' && fields.confidence === undefined) {
     throw new Error('status=hypothesis には --confidence（0..1）が必要');
   }
@@ -268,6 +288,9 @@ function recordStatement(osDir, fields) {
     conditions: fields.conditions,
     exceptions: fields.exceptions,
     confidence: fields.confidence,
+    // Unknown専用（CONCEPTv2 §13）。type: unknown 以外に付くと検証エラーになる
+    blocks: fields.blocks,
+    importance: fields.importance,
     links: fields.links,
     supersedes: fields.supersedes,
     provenance,

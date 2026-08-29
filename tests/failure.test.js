@@ -122,6 +122,51 @@ test('classified(missing_evaluator): evaluator提案スタブを起票しFailure
   assert.ok(!fs.existsSync(path.join(osDir, 'evaluators', `${entry.id.toLowerCase()}_detector.yaml`)));
 });
 
+test('提案の差し替え: supersedes_reasonが無ければ再提案できない', () => {
+  const { osDir } = makeOs();
+  const { entry } = failure.report(osDir, { symptom: '誤った提案を撤回できない' });
+  failure.transition(osDir, entry.id, 'investigated', {
+    root_cause: '提案の差し替え経路が無い',
+    why_undetected: '状態機械に自己遷移が無かった',
+  });
+  failure.transition(osDir, entry.id, 'classified', { classification: 'missing_constraint' });
+  failure.transition(osDir, entry.id, 'upgrade_proposed', { proposal: '最初の提案（誤り）' });
+  // 理由なしの再提案は拒否（黙って上書きさせない）
+  assert.throws(
+    () => failure.transition(osDir, entry.id, 'upgrade_proposed', { proposal: '出し直した提案' }),
+    /supersedes_reason/
+  );
+  // proposalも依然として必須
+  assert.throws(
+    () => failure.transition(osDir, entry.id, 'upgrade_proposed', { supersedes_reason: '対象を取り違えた' }),
+    /proposal必須/
+  );
+  const again = failure.transition(osDir, entry.id, 'upgrade_proposed', {
+    proposal: '出し直した提案',
+    supersedes_reason: '最初の提案は対象を取り違えていた',
+  });
+  assert.strictEqual(again.state, 'upgrade_proposed');
+  assert.strictEqual(again.supersedes_reason, '最初の提案は対象を取り違えていた');
+
+  // 台帳は追記専用: 両方の提案が履歴として残り、現在ビューは新しい方を指す
+  const cur = failure.loadFailures(osDir)[entry.id];
+  const proposals = cur.history.filter((h) => h.state === 'upgrade_proposed');
+  assert.strictEqual(proposals.length, 2);
+  assert.strictEqual(proposals[0].proposal, '最初の提案（誤り）');
+  assert.strictEqual(proposals[1].proposal, '出し直した提案');
+  assert.strictEqual(cur.proposal, '出し直した提案');
+
+  // 差し替え後もimplementedへ進める
+  const done = failure.transition(osDir, entry.id, 'implemented', {
+    assets: [
+      { kind: 'golden_task', ref: 'gt-003' },
+      { kind: 'rule', ref: 'core/failure.js:supersedes_reason' },
+    ],
+    regression_ref: 'reg-003',
+  });
+  assert.strictEqual(done.state, 'implemented');
+});
+
 test('提案スタブは既存ファイルを上書きしない', () => {
   const { osDir } = makeOs();
   const { entry } = failure.report(osDir, { symptom: '別の症状' });

@@ -74,6 +74,24 @@ node cli/index.js feedback "この結果は駄目だった。俺ならこうし�
 
 承認したら `/upgrade-os` で適用され、os_versionが上がる。
 
+## 3.5 判断を残し、期限が来たら答え合わせする
+
+「なぜそう決めたか」を残さないと、同じ判断を毎回ゼロから、しかも前回の結果を知らないまま
+やり直すことになる。決定は選択肢・基準・期待結果・レビュー期限をつけて残す:
+
+```bash
+node cli/index.js decision new "5分足のまま研究を続ける" --options "5分足,日足" --chosen "5分足" --criteria "デイトレの粒度を保てるか" --expected "同一日内の出入りが測れる" --review-after 2026-09-05
+```
+
+期限を過ぎた決定は、他のコマンドの実行時に運用ヒントとして催促される。答え合わせは:
+
+```bash
+node cli/index.js decision outcome S0012 --result unmet --note "実際には出入りが測れなかった"
+```
+
+`unmet` を記録すると、OSは「ログで終わらせずFailureとして起票せよ」と促す。
+過去の決定と結果は `node cli/index.js query get_past_decisions` で引ける。
+
 ## 4. 育っているかを数字で見る
 
 ```bash
@@ -85,7 +103,8 @@ node cli/index.js metrics --json
 | 指標 | 意味 | 育っていれば |
 |---|---|---|
 | tokens.cheap_path_coverage | 高価なLLM(T2/T3)なしで完了したタスク比率 | 上がる |
-| tokens.by_task | タスクあたりトークン | 同種タスクで下がる |
+| tokens.by_task | タスクあたりトークン（**自己申告**） | 同種タスクで下がる |
+| context.briefing_tokens_total | 評価に渡した文脈の量（**コアの実測**） | 同種タスクで下がる |
 | verdicts.deterministic_ratio | 決定的評価の比率 | 上がる |
 | failures.open | 未消化の失敗 | 0に保つ |
 | compile_candidates | 「これを資産化せよ」というOSからの提案 | 出たら対応 |

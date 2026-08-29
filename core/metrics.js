@@ -10,6 +10,7 @@ function computeMetrics(osDir) {
   const costs = readJsonl(path.join(osDir, 'observations', 'costs.jsonl'));
   const verdicts = readJsonl(path.join(osDir, 'evaluations', 'log.jsonl'));
   const queryLog = readJsonl(path.join(osDir, 'observations', 'query_log.jsonl'));
+  const contextLog = readJsonl(path.join(osDir, 'observations', 'context_log.jsonl'));
   const tasks = loadTasks(osDir);
   const failures = loadFailures(osDir);
 
@@ -85,6 +86,19 @@ function computeMetrics(osDir) {
     }
   }
 
+  // Context消費の実測（§14 / A1）。自己申告のToken Ledgerとは別系統で、
+  // OSが実際に生成したbriefingとQuery結果の大きさだけを数える。
+  let briefingTokensTotal = 0;
+  const contextPerTask = {};
+  for (const c of contextLog) {
+    if (c.kind !== 'briefing') continue;
+    const t = c.tokens_est || 0;
+    briefingTokensTotal += t;
+    if (c.task) contextPerTask[c.task] = (contextPerTask[c.task] || 0) + t;
+  }
+  let queryTokensTotal = 0;
+  for (const q of queryLog) queryTokensTotal += q.tokens_est || 0;
+
   // Failure集計
   const failureList = Object.values(failures);
   const openFailures = failureList.filter((f) => !TERMINAL.includes(f.state));
@@ -110,6 +124,11 @@ function computeMetrics(osDir) {
       counts: verdictCounts,
       deterministic_ratio: verdicts.length ? detVerdicts / verdicts.length : null,
       total: verdicts.length,
+    },
+    context: {
+      briefing_tokens_total: briefingTokensTotal,
+      query_tokens_total: queryTokensTotal,
+      per_task: contextPerTask,
     },
     queries: queryStats,
     failures: {

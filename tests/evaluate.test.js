@@ -109,9 +109,14 @@ test('next-action: §11の写像（UNCERTAIN/insufficient/model_limitation/missi
   // UNCERTAIN(model_limitation) → DEEP_RESEARCH
   evaluate.recordVerdict(osDir, { task: t.id, evaluator: 'b', verdict: 'UNCERTAIN', evidence: ['e'], reason: 'model_limitation' });
   assert.strictEqual(evaluate.nextAction(osDir, t.id).action, 'DEEP_RESEARCH');
-  // UNCERTAIN(理由なし) → INVESTIGATE
+  // UNCERTAIN(理由なし)が1回 → INVESTIGATE（連続していない状態を別タスクで確認する）
+  const t2 = evaluate.newTask(osDir, 'map-single-uncertain', ['a']);
+  evaluate.recordVerdict(osDir, { task: t2.id, evaluator: 'a', verdict: 'UNCERTAIN', evidence: ['e'] });
+  assert.strictEqual(evaluate.nextAction(osDir, t2.id).action, 'INVESTIGATE');
+  // 同じevaluatorのUNCERTAINが2回続いたら DEEP_RESEARCH へ昇格する
+  // （同じ強さで調べ直しても解けなかったという記録。詳細は next-action-escalation.test.js）
   evaluate.recordVerdict(osDir, { task: t.id, evaluator: 'b', verdict: 'UNCERTAIN', evidence: ['e'] });
-  assert.strictEqual(evaluate.nextAction(osDir, t.id).action, 'INVESTIGATE');
+  assert.strictEqual(evaluate.nextAction(osDir, t.id).action, 'DEEP_RESEARCH');
   // 全PASS → DONE（タスクstatusも更新される）
   evaluate.recordVerdict(osDir, { task: t.id, evaluator: 'b', verdict: 'PASS', evidence: ['e'] });
   assert.strictEqual(evaluate.nextAction(osDir, t.id).action, 'DONE');

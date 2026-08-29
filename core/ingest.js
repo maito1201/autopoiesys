@@ -133,11 +133,30 @@ function splitByHeading(text) {
   return sections;
 }
 
-// frontmatter（--- で囲まれたYAML）と本文を分離する
-function splitFrontmatter(text) {
+// frontmatter（--- で囲まれたYAML）を読む。例外を投げず {front, error} で返す。
+// 1件の不正で取込全体がabortすると、健全な残り全部が失われる（実運用で121件中3件の不正により
+// 全体が停止した）。壊れたファイルは「取り込めなかった」と申告してスキップするのが正しい。
+// frontmatterが無いこと自体は不正ではない（error=null, front=null）。
+function readFrontmatter(abs) {
+  let text;
+  try {
+    text = readTextFile(abs);
+  } catch (e) {
+    return { front: null, error: `ファイルを読めない: ${e.message}` };
+  }
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(text);
-  if (!m) return { front: null, body: text };
-  return { front: parseYaml(m[1]) || {}, body: text.slice(m[0].length) };
+  if (!m) return { front: null, error: null };
+  let front;
+  try {
+    front = parseYaml(m[1]);
+  } catch (e) {
+    return { front: null, error: `frontmatterを解析できない: ${e.message}` };
+  }
+  if (front !== null && (typeof front !== 'object' || Array.isArray(front))) {
+    // key: value のマップでないものは索引として読めない（本文がそのまま挟まっている等）
+    return { front: null, error: 'frontmatterがマップではない' };
+  }
+  return { front: front || {}, error: null };
 }
 
 // リポジトリの作業規約ドキュメント（CLAUDE.md / AGENTS.md 等）を見出し単位のplaybook
@@ -218,10 +237,19 @@ function ingestMemoryIndex(osDir, { scope, dir, dryRun = false } = {}) {
   const supersede = makeSuperseder(events, latest, scope);
   const statements = [];
   const skippedFiles = [];
+  const unparsable = [];
+  const parseWarnings = [];
   const files = fs.readdirSync(base).filter((f) => f.endsWith('.md') && f !== 'MEMORY.md').sort();
   for (const f of files) {
     const abs = path.join(base, f);
-    const { front } = splitFrontmatter(readTextFile(abs));
+    const { front, error } = readFrontmatter(abs);
+    if (error) {
+      // 読めない1件のために健全な残りを捨てない。パスと理由を警告として持ち帰り、人が直せるようにする
+      skippedFiles.push(f);
+      unparsable.push({ file: f, path: abs, reason: error });
+      parseWarnings.push(`${abs}: ${error}`);
+      continue;
+    }
     const desc = front && front.description ? flatten(String(front.description)) : '';
     if (!desc) {
       // descriptionの無いメモリは1行の主張に蒸留されていない。機械取込の対象外として申告する
@@ -249,7 +277,14 @@ function ingestMemoryIndex(osDir, { scope, dir, dryRun = false } = {}) {
     if (withSup) statements.push(withSup);
   }
   const result = commitOrPreview(osDir, statements, dryRun);
-  return { ...result, files_seen: files.length, skipped_files: skippedFiles };
+  return {
+    ...result,
+    warnings: [...(result.warnings || []), ...parseWarnings],
+    files_seen: files.length,
+    skipped_files: skippedFiles,
+    // 「descriptionが無い（そもそも索引化対象外）」と「壊れていて読めない（直すべき）」を混ぜない
+    unparsable_files: unparsable,
+  };
 }
 
 // dryRun時は追記せず「追記されるはずだったもの」だけを返す。取込漏れ・更新漏れの検査

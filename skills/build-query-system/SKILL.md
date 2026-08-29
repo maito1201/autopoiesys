@@ -43,11 +43,19 @@ QueryはOS Builderが領域に応じて設計するものであり、固定API�
 
 4. 対応するproposalファイルがあれば削除する（提案の消化）。
 
+## 同梱Query
+
+`init` が `queries/get_past_decisions.yaml`（過去の決定とレビュー結果）だけを生成する。
+decision / outcome はコアの語彙なので、引く手段までコアが用意する — これが無いと
+決定は「書いたが二度と読まれない記録」になり、Decision Modelがログに退化する。
+ユーザーが編集していれば `init --force` でも上書きしない。
+
 ## 典型的なQuery（あくまで例 — 領域に合わせて設計する）
 
 - get_constraints — 有効な制約（タスク実行前に必ず読む）
 - get_historical_failures — 過去のFailureと予防資産
-- get_open_unknowns — 未解決のUnknown（調査候補）
+- get_open_unknowns — 未解決のUnknown（調査候補。`blocks` / `importance` を
+  projectに含めると「どの判断を塞いでいるか」で並べられる）
 - get_counter_evidence — ある仮説への反証
 - get_related — あるStatementの関連（expandステップ）
 

@@ -100,6 +100,22 @@ tags:
   - git-branch
 `;
 
+// 唯一の同梱Query。他のQueryはドメインごとに build-query-system で設計するが、
+// decision / outcome はコアの語彙なので、引く手段までコアが用意する。
+// これが無いと決定は「書いたが二度と読まれない記録」になり、Decision Modelが
+// 事実上ログに退化する（CONCEPT §8 / TODO C2）。
+const QUERY_PAST_DECISIONS = `name: get_past_decisions
+description: 過去の決定と、そのレビュー結果（met/unmet/unclear）。似た判断をする前に必ず引く。
+pipeline:
+  - select: { type: decision }
+  - where: { status: [fact, hypothesis] }
+  # outcomeは derived_from で決定を指す。in方向に辿ると「その決定がどうなったか」が付く
+  - expand: { roles: [derived_from], direction: in, limit: 3 }
+  - project: [id, body, chosen, options, criteria, expected_outcome, review_after, tags, linked]
+  - limit: 20
+max_tokens: 1500
+`;
+
 const OS_README = `# .os/ — ユーザー固有Intelligence OS
 
 このディレクトリはautopoiesys OSS Coreが生成・操作するユーザー固有OSである。
@@ -185,6 +201,7 @@ function initOs(targetDir, { force = false } = {}) {
   writeIfAbsent('config.yaml', CONFIG_TEMPLATE);
   writeIfAbsent('goal.yaml', GOAL_TEMPLATE);
   writeIfAbsent(path.join('world_model', 'vocabulary.yaml'), VOCABULARY_TEMPLATE);
+  writeIfAbsent(path.join('queries', 'get_past_decisions.yaml'), QUERY_PAST_DECISIONS);
   writeIfAbsent('README.md', OS_README);
   const stubs = syncSkills(targetDir);
   return { osDir, created: dirs, skill_stubs: stubs };
