@@ -158,6 +158,15 @@ function buildReasoningContext(osDir, { task, evaluator, maxTokens, snapshot: pr
     }
   }
 
+  // (b') 同じタスク類型の教訓は、語が重ならなくても届ける。蒸留された経験は
+  //      「この類型で効く」と宣言されているのだから、想起を語の偶然に任せない
+  if (task && task.class_fp) {
+    for (const id of Object.keys(snapshot.statements)) {
+      const st = snapshot.statements[id];
+      if (st.type === 'lesson' && st.task_class === task.class_fp) bump(id, 6, '同一類型の教訓');
+    }
+  }
+
   // (c) (a)(b)で得たStatementから1ホップ。反証（counters）は判定を覆しうるため
   //     支持（supports）より強く重み付けする — 都合の良い証拠だけが残る選抜を避ける。
   const seeds = Object.keys(scored).sort();
@@ -191,7 +200,12 @@ function buildReasoningContext(osDir, { task, evaluator, maxTokens, snapshot: pr
     // 関連度降順 → id昇順。同点でも順序が揺れない（briefingの再現性）
     .sort((a, b) => (b.score - a.score) || (a.id < b.id ? -1 : 1));
 
-  const header = ['## Reasoning Context'];
+  // 確立済みの方針を先頭に置く。過去の決定を畳み込んだもので、生成に推論を使っていない。
+  // Statementの選抜より前に出すのは、これが「読むかどうか」を選ぶ材料ではなく
+  // 判断の既定だからである（決定的な語一致で選ぶ。埋め込みもLLMも使わない）。
+  const policyLines = require('./policy').policySection(osDir, [...extractTerms(taskText(task))]);
+
+  const header = [...policyLines, '## Reasoning Context'];
   header.push('');
   header.push(
     '目的に関連するStatementだけを決定的に選抜した最小Subgraph'

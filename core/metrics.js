@@ -99,6 +99,38 @@ function computeMetrics(osDir) {
   let queryTokensTotal = 0;
   for (const q of queryLog) queryTokensTotal += q.tokens_est || 0;
 
+  // 方針層（直感）の実測。**発火数と節約トークン量を成功指標にしない** —
+  // 大量に発火したことは、正しく発火したことを意味しない。判定に要るのは
+  // 「方針が発火した判断の結末」と「熟慮した判断の結末」の比較である。
+  // 方針が熟慮より悪ければ、この層は害であり、それはここで観測できなければならない。
+  const policyEvents = { hits: 0, compiled: 0, retracted: 0 };
+  for (const c of contextLog) {
+    if (c.kind === 'policy_hit') policyEvents.hits++;
+    else if (c.kind === 'policy_compiled') policyEvents.compiled++;
+    else if (c.kind === 'policy_retracted') policyEvents.retracted++;
+  }
+  const policyOutcomes = { under_policy: { met: 0, unmet: 0, unclear: 0 }, deliberate: { met: 0, unmet: 0, unclear: 0 } };
+  let activePolicies = 0;
+  try {
+    const policy = require('./policy');
+    const all = policy.listPolicies(osDir);
+    activePolicies = all.filter((p) => p.status === 'active').length;
+    // 方針が既に存在した判断の場での決定か、そうでないかで結果を分ける。
+    // 方針の evidence に載っている決定（方針の元になった決定）は熟慮側に数える
+    const compiledFps = new Set(all.map((p) => p.fingerprint));
+    const evidenceIds = new Set(all.flatMap((p) => p.evidence || []));
+    for (const bucket of Object.values(policy.foldByFingerprint(osDir))) {
+      for (const d of bucket.decisions) {
+        const side = compiledFps.has(bucket.fingerprint) && !evidenceIds.has(d.id) ? 'under_policy' : 'deliberate';
+        for (const o of d.outcomes) {
+          if (policyOutcomes[side][o.result] !== undefined) policyOutcomes[side][o.result]++;
+        }
+      }
+    }
+  } catch {
+    // World Model未整備でもmetrics全体を落とさない
+  }
+
   // Failure集計
   const failureList = Object.values(failures);
   const openFailures = failureList.filter((f) => !TERMINAL.includes(f.state));
@@ -129,6 +161,14 @@ function computeMetrics(osDir) {
       briefing_tokens_total: briefingTokensTotal,
       query_tokens_total: queryTokensTotal,
       per_task: contextPerTask,
+    },
+    policy: {
+      active: activePolicies,
+      hits: policyEvents.hits,
+      compiled: policyEvents.compiled,
+      retracted: policyEvents.retracted,
+      // この2列の比較だけが方針層の是非を決める。発火数はここに入れない
+      outcomes: policyOutcomes,
     },
     queries: queryStats,
     failures: {

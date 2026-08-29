@@ -5,48 +5,58 @@ const { makeOs } = require('./helpers');
 const decision = require('../core/decision');
 const store = require('../core/store');
 
-const BEFORE = '2026-09-01T00:00:00Z';
-const AFTER = '2026-10-15T00:00:00Z';
+const SITUATION = 'ジョブキューの実装方式を選ぶ';
+const OPTIONS = ['redis', 'postgres', 'sqs'];
 
-function makeDecision(osDir) {
+function makeDecision(osDir, over = {}) {
   return decision.newDecision(osDir, 'ジョブキューはRedisで実装する', {
-    options: ['redis', 'postgres', 'sqs'],
+    situation: SITUATION,
+    options: OPTIONS,
     chosen: 'redis',
     criteria: ['運用コスト', '既存スタックとの整合'],
     expected_outcome: 'p95のキュー遅延が100ms未満に収まる',
-    review_after: '2026-09-30',
     tags: ['infra'],
     source: 'user',
+    ...over,
   });
 }
 
-test('new→期限経過→due列挙→outcome記録→dueから消える・unmetでfeedback誘導', () => {
+test('決定を書こうとした瞬間に、同じ判断の場の過去が返る（再来が契機）', () => {
   const { osDir } = makeOs();
-  const { id } = makeDecision(osDir);
-  assert.match(id, /^S\d{4}$/);
+  const first = makeDecision(osDir);
+  assert.match(first.id, /^S\d{4}$/);
+  // 初回は突き返す過去が無い
+  assert.deepStrictEqual(first.recall.prior, []);
+  assert.deepStrictEqual(first.recall.messages, []);
 
-  // 期限前はdueに出ない
-  assert.deepStrictEqual(decision.listDecisions(osDir, { due: true, now: BEFORE }), []);
+  // 同じ場に戻ってくると、前回の選択が返る。結果が未記録なら「今埋めろ」と言う
+  const second = makeDecision(osDir, { body: 'やはりRedisで実装する' });
+  assert.strictEqual(second.recall.prior.length, 1);
+  assert.strictEqual(second.recall.prior[0].chosen, 'redis');
+  assert.deepStrictEqual(second.recall.unreviewed, [first.id]);
+  assert.ok(second.recall.messages.some((m) => m.includes('結果が未記録')));
+  assert.ok(second.recall.messages.some((m) => m.includes('答え合わせの時')));
+  // 判断の場が同じなら fingerprint は一致する
+  assert.strictEqual(second.statement.fingerprint, first.statement.fingerprint);
+});
 
-  // 期限経過で未レビューとして出る
-  const due = decision.listDecisions(osDir, { due: true, now: AFTER });
-  assert.deepStrictEqual(due.map((d) => d.id), [id]);
-  assert.strictEqual(due[0].chosen, 'redis');
-  assert.deepStrictEqual(due[0].options, ['redis', 'postgres', 'sqs']);
-  assert.strictEqual(due[0].reviewed, false);
+test('言い回しが違っても、同じ situation と options なら同じ判断の場として一致する', () => {
+  const { osDir } = makeOs();
+  const a = makeDecision(osDir);
+  const b = decision.newDecision(osDir, '全く違う書き方をした本文', {
+    situation: SITUATION,
+    options: ['sqs', 'redis', 'postgres'], // 並び順が違っても同じ場
+    chosen: 'redis',
+    source: 'user',
+  });
+  assert.strictEqual(b.statement.fingerprint, a.statement.fingerprint);
+  assert.strictEqual(b.recall.prior.length, 1);
+});
 
-  const r = decision.recordOutcome(osDir, id, { result: 'unmet', note: 'p95が300msで頭打ち' });
-  assert.strictEqual(r.suggest_feedback, true);
-  assert.match(r.message, /feedback/);
-  assert.match(r.message, /p95のキュー遅延/);
-
-  // レビュー済みなので再度dueには出ない
-  assert.deepStrictEqual(decision.listDecisions(osDir, { due: true, now: AFTER }), []);
-  const all = decision.listDecisions(osDir, { now: AFTER });
-  assert.strictEqual(all.length, 1);
-  assert.strictEqual(all[0].reviewed, true);
-  assert.strictEqual(all[0].outcome.result, 'unmet');
-  assert.strictEqual(all[0].outcome.note, 'p95が300msで頭打ち');
+test('situationが無ければ書けない（判断の場を同定できないため）', () => {
+  const { osDir } = makeOs();
+  assert.throws(() => decision.newDecision(osDir, 'x', { source: 'u' }), /--situation が必要/);
+  assert.strictEqual(store.loadEvents(osDir).length, 0);
 });
 
 test('outcomeは追記でdecisionをsupersedeしない（derived_fromで元へ張る）', () => {
@@ -56,7 +66,6 @@ test('outcomeは追記でdecisionをsupersedeしない（derived_fromで元へ�
   assert.strictEqual(r.suggest_feedback, false);
 
   const snap = store.getSnapshot(osDir);
-  // 元のdecisionは現在状態に残ったまま
   assert.strictEqual(snap.statements[id].type, 'decision');
   const out = snap.statements[r.id];
   assert.strictEqual(out.type, 'outcome');
@@ -65,55 +74,35 @@ test('outcomeは追記でdecisionをsupersedeしない（derived_fromで元へ�
   assert.strictEqual(out.result, 'met');
   assert.strictEqual(out.decision, id);
   assert.deepStrictEqual(snap.indexes.links_in[id], [{ from: r.id, role: 'derived_from' }]);
-  // 追記専用: イベントは2件とも残る
   assert.strictEqual(store.loadEvents(osDir).length, 2);
 });
 
-test('review_afterがイベント指定なら時間では期限切れにしない', () => {
-  const { osDir } = makeOs();
-  decision.newDecision(osDir, 'キャッシュ層を入れるかは負荷試験後に見直す', {
-    chosen: '入れない',
-    review_after: '負荷試験の完了時',
-    source: 'user',
-  });
-  assert.deepStrictEqual(decision.listDecisions(osDir, { due: true, now: AFTER }), []);
-  const all = decision.listDecisions(osDir, { now: AFTER });
-  assert.strictEqual(all.length, 1);
-  assert.strictEqual(all[0].overdue, false);
-});
-
-test('reviewSummary: 期限切れ件数と運用ヒント', () => {
+test('unmetはFailure起票を促す', () => {
   const { osDir } = makeOs();
   const { id } = makeDecision(osDir);
-  assert.strictEqual(decision.reviewSummary(osDir, { now: BEFORE }).due, 0);
-  assert.deepStrictEqual(decision.reviewSummary(osDir, { now: BEFORE }).hints, []);
-
-  const s = decision.reviewSummary(osDir, { now: AFTER });
-  assert.strictEqual(s.due, 1);
-  assert.strictEqual(s.unreviewed_overdue[0].id, id);
-  assert.strictEqual(s.unreviewed_overdue[0].review_after, '2026-09-30');
-  assert.strictEqual(s.hints.length, 1);
-  assert.match(s.hints[0], /レビュー期限切れのdecisionが1件/);
-
-  decision.recordOutcome(osDir, id, { result: 'unclear', note: '判定に足る計測が無い' });
-  assert.strictEqual(decision.reviewSummary(osDir, { now: AFTER }).due, 0);
+  const r = decision.recordOutcome(osDir, id, { result: 'unmet', note: 'p95が300msで頭打ち' });
+  assert.strictEqual(r.suggest_feedback, true);
+  assert.match(r.message, /feedback/);
+  assert.match(r.message, /p95のキュー遅延/);
+  const all = decision.listDecisions(osDir);
+  assert.strictEqual(all[0].reviewed, true);
+  assert.strictEqual(all[0].outcome.result, 'unmet');
+  assert.deepStrictEqual(decision.listDecisions(osDir, { unreviewed: true }), []);
 });
 
 test('検証: bodyなし・chosenがoptions外・不正なresult・存在しないdecision', () => {
   const { osDir } = makeOs();
   assert.throws(() => decision.newDecision(osDir, '', {}), /bodyが必要/);
   assert.throws(
-    () => decision.newDecision(osDir, 'x', { options: ['a', 'b'], chosen: 'c' }),
+    () => decision.newDecision(osDir, 'x', { situation: 's', options: ['a', 'b'], chosen: 'c' }),
     /options に含まれない/
   );
-  assert.throws(() => decision.newDecision(osDir, 'x', { criteria: 'コスト' }), /criteriaは/);
-  // 検証で落ちた分は1件も書かれていない
+  assert.throws(() => decision.newDecision(osDir, 'x', { situation: 's', criteria: 'コスト' }), /criteriaは/);
   assert.strictEqual(store.loadEvents(osDir).length, 0);
 
   const { id } = makeDecision(osDir);
   assert.throws(() => decision.recordOutcome(osDir, id, { result: 'maybe' }), /met\|unmet\|unclear/);
   assert.throws(() => decision.recordOutcome(osDir, 'S9999', { result: 'met' }), /存在しない/);
-  // decision以外のStatementにはoutcomeを張れない
   const other = store.recordStatement(osDir, { body: 'ただの主張', type: 'claim', source: 'test' });
   assert.throws(
     () => decision.recordOutcome(osDir, other.added[0], { result: 'met' }),
@@ -128,7 +117,18 @@ test('再レビューは最新のoutcomeで判定し、前回分も返す', () =
   const second = decision.recordOutcome(osDir, id, { result: 'unmet', note: '再計測でNG' });
   assert.deepStrictEqual(second.previous_outcome, { id: first.id, result: 'unclear' });
   assert.strictEqual(second.suggest_feedback, true);
-  const all = decision.listDecisions(osDir, { now: AFTER });
+  const all = decision.listDecisions(osDir);
   assert.strictEqual(all[0].outcome.id, second.id);
   assert.strictEqual(all[0].outcome.result, 'unmet');
+});
+
+test('situationは type: decision 以外には付けられない', () => {
+  const { osDir } = makeOs();
+  assert.throws(
+    () => store.assertStatements(osDir, [{
+      type: 'claim', body: 'x', status: 'fact', situation: 'a',
+      provenance: { source: 't', method: 'human' },
+    }]),
+    /situationは type: decision でのみ使える/
+  );
 });

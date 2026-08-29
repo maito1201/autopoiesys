@@ -74,23 +74,112 @@ node cli/index.js feedback "この結果は駄目だった。俺ならこうし�
 
 承認したら `/upgrade-os` で適用され、os_versionが上がる。
 
-## 3.5 判断を残し、期限が来たら答え合わせする
+## 3.5 判断を畳み込んで、考え直さずに済むようにする
 
-「なぜそう決めたか」を残さないと、同じ判断を毎回ゼロから、しかも前回の結果を知らないまま
-やり直すことになる。決定は選択肢・基準・期待結果・レビュー期限をつけて残す:
-
-```bash
-node cli/index.js decision new "5分足のまま研究を続ける" --options "5分足,日足" --chosen "5分足" --criteria "デイトレの粒度を保てるか" --expected "同一日内の出入りが測れる" --review-after 2026-09-05
-```
-
-期限を過ぎた決定は、他のコマンドの実行時に運用ヒントとして催促される。答え合わせは:
+同じ判断を毎回ゼロから、しかも前回の結果を知らないままやり直すのは高くつく。
+決定は「何を選ぶ場面か（situation）」に紐づけて残す:
 
 ```bash
-node cli/index.js decision outcome S0012 --result unmet --note "実際には出入りが測れなかった"
+node cli/index.js decision new "5分足のまま研究を続ける" --situation "デイトレ研究の足の粒度を選ぶ" --options "5分足,日足" --chosen "5分足" --criteria "同一日内の出入りが測れるか" --expected "同一日内の出入りが測れる"
 ```
 
-`unmet` を記録すると、OSは「ログで終わらせずFailureとして起票せよ」と促す。
-過去の決定と結果は `node cli/index.js query get_past_decisions` で引ける。
+**同じ場にもう一度立つと、前回の選択と結果がその場で返ってきます。**
+期限で催促する仕組みはありません。前回の結果が未記録なら、再来した瞬間に
+「今が答え合わせの時だ」と言われます。答え合わせは:
+
+```bash
+node cli/index.js decision outcome S0012 --result met --note "同一日内の出入りが測れた"
+```
+
+同じ選択が2回以上反復し、結果が met で、unmet が1件も無くなると、
+その判断は**方針**として `.os/rules/` に畳み込まれます。以後、同じ場では
+LLM推論をまったく使わずに選択が返ります。
+
+```bash
+node cli/index.js policy match "デイトレ研究の足の粒度を選ぶ" --options "5分足,日足"
+```
+
+方針は反証されると自動で撤回されます（`unmet` が1件出た時点、または方針に反する選択が
+`met` になった時点）。裁量で残すことはできません。育ち具合は `metrics` の
+`policy.outcomes` で見ます — 方針の下で下した判断と、熟慮した判断の met/unmet を
+並べた2列です。**発火数が多いことは良いことではありません。**
+
+## 3.6 日々の仕事を成長に変える
+
+同じ種類の仕事には同じ類型（class）を付けます。これが日々の成長の入口です:
+
+```bash
+node cli/index.js task new "今日の銘柄スクリーニングを回す" --class "日次の銘柄スクリーニング" --evaluators e1,e2 --repos kabu
+```
+
+2回目以降は、**過去の同種タスクで学んだ教訓が、聞かなくても出力に届きます**。
+タスクが終わったら、学んだことを1行に蒸留して締めます:
+
+```bash
+node cli/index.js statement add "寄り付き直後の板は薄いので判定から除外する" --type lesson --when "日次スクリーニングの朝一実行" --source "T012の実測" --task T012
+```
+
+```bash
+node cli/index.js task consolidate T012 --lessons S0031 --helped S0020 --misled S0018
+```
+
+教訓は正しいのに適用しなかった（適用場面があったのに使い損ねた）場合は、
+misled ではなく unapplied で開示します — misled と書くと正しい教訓が反証で引退します:
+
+```bash
+node cli/index.js task consolidate T012 --lessons S0031 --unapplied S0036 --unapplied-reason "適用場面はあったが再測定を怠った"
+```
+
+外れた教訓（--misled）は反証として記録され、外れが続いた教訓は届かなくなります。
+
+ただし「効いた／外れた」は**作業した本人の申告**です。申告のままだと、教訓の実績数は
+自己申告の合計にしかなりません。申告が台帳の記録と整合するかは、会話履歴を持たない
+別の判定者に見てもらいます:
+
+```bash
+node cli/index.js experience audit T012
+```
+
+台帳の機械記録（成果物の登録時刻・評価のverdict・想起の配信ログ・事前固定した手順）と
+申告そのものだけを載せたbriefingが `.os/briefings/` に出ます。完了報告の本文は入りません
+（申告の説明を読んで申告を判定してしまわないためです）。判定はこう記録します:
+
+```bash
+node cli/index.js experience audit-record T012 --lesson S0020 --result supported --note "根拠にした記録"
+```
+
+`contradicted`（記録が申告と食い違う）を記録すると、蒸留が書いた「効いた」の裏づけは
+撤回され、反証が監査者名義で書き戻されます。記録に現れないだけなら `insufficient` です
+（台帳に無いことは、起きなかったことを意味しません）。
+
+成長したかは類型ごとの系列で見ます:
+
+```bash
+node cli/index.js growth スクリーニング
+```
+
+試行ごとのFAIL数・トークン・教訓数が並びます。試行3回未満の類型では傾向は出ません
+（出せないものを出さないのは仕様です）。
+
+やることが分からなくなったら、OSに聞きます:
+
+```bash
+node cli/index.js agenda
+```
+
+未解決のUnknown・止まっているFailure・外れた教訓・測れていない基準から、
+次にやるべき仕事が優先度つきで返ります。適用済みの提案は消え、既に着手している項目は
+着手中のタスクIDつきで順位が下がります。
+
+挙がった仕事に着手するときは、どの項目に由来するかを登録します:
+
+```bash
+node cli/index.js task new "..." --origin agenda:S0035 --class "..." --evaluators e1 --repos r
+```
+
+`--origin` がOS由来（`agenda:` / `failure:` / `lesson:` / `unknown:`）を名乗る場合、
+指した項目が台帳に実在するかを登録時に照合します。実在しなければ**登録は失敗します** —
+接頭辞つきの文字列を打つだけで「自発的に動いた」ことになってしまうからです。
 
 ## 4. 育っているかを数字で見る
 

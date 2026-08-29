@@ -9,6 +9,9 @@ const STATEMENT_TYPES = [
   'entity', 'relationship', 'observation', 'claim', 'evidence', 'hypothesis',
   'unknown', 'decision', 'constraint', 'goal', 'outcome', 'failure',
   'capability', // Goal分解（CONCEPTv2 §5）の受け皿。Gap分析の分類単位
+  // 蒸留された経験。生ログではなく「次に同種の仕事をするとき使える1行」。
+  // 適用条件（when）とタスク類型（task_class）を持ち、再来時に黙っていても届く
+  'lesson',
 ];
 const STATUSES = ['fact', 'hypothesis', 'unknown', 'retracted'];
 const LINK_ROLES = ['supports', 'counters', 'about', 'derived_from', 'relates_to', 'caused_by', 'prevents'];
@@ -163,6 +166,31 @@ function validateStatement(st, { knownIds, vocab, used, strict, assetCheck }) {
       errors.push(`${label}: importanceは0..1の数値`);
     }
   }
+  // lesson専用フィールド。when = 適用条件（いつこの教訓が効くか）、
+  // task_class = タスク類型のfingerprint（同種のタスクの再来時に届けるための鍵）。
+  if (st.when !== undefined) {
+    if (st.type !== 'lesson') {
+      errors.push(`${label}: whenは type: lesson でのみ使える`);
+    } else if (typeof st.when !== 'string' || !st.when.trim()) {
+      errors.push(`${label}: whenは空でない文字列（この教訓がいつ適用されるかの1行）`);
+    }
+  }
+  if (st.task_class !== undefined) {
+    if (st.type !== 'lesson') {
+      errors.push(`${label}: task_classは type: lesson でのみ使える`);
+    } else if (typeof st.task_class !== 'string' || !st.task_class.trim()) {
+      errors.push(`${label}: task_classは空でない文字列（タスク類型のfingerprint）`);
+    }
+  }
+  // situation = 判断の場の抽象。これが無いと同じ判断の再来を検出できないので、
+  // decision以外に付いているのは取り違えとして落とす。
+  if (st.situation !== undefined) {
+    if (st.type !== 'decision') {
+      errors.push(`${label}: situationは type: decision でのみ使える`);
+    } else if (typeof st.situation !== 'string' || !st.situation.trim()) {
+      errors.push(`${label}: situationは空でない文字列（何を選ぶ場面かの1行の抽象）`);
+    }
+  }
   for (const f of ['conditions', 'exceptions']) {
     if (st[f] !== undefined && (!Array.isArray(st[f]) || st[f].some((c) => typeof c !== 'string'))) {
       errors.push(`${label}: ${f}は文字列の配列`);
@@ -291,6 +319,9 @@ function recordStatement(osDir, fields) {
     // Unknown専用（CONCEPTv2 §13）。type: unknown 以外に付くと検証エラーになる
     blocks: fields.blocks,
     importance: fields.importance,
+    // lesson専用。type: lesson 以外に付くと検証エラーになる
+    when: fields.when,
+    task_class: fields.task_class,
     links: fields.links,
     supersedes: fields.supersedes,
     provenance,

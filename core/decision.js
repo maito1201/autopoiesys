@@ -1,21 +1,24 @@
 'use strict';
-// Decision Model（CONCEPT §8）の最小実装。
-// 「OSは情報を保存するだけではいけない」— 決定を選択肢・基準・期待結果・レビュー期限を持つ
-// 構造として残し、期限後に結果を照合するループを閉じる。
-// 保存層は作らない: 既存の world_model/events.jsonl（store.assertStatements）に追記する。
+// Decision Model（CONCEPT §8）。**支援対象はAI自身であって人間ではない。**
+//
+// 第1版は人間向けの帳簿だった（レビュー期限という日付を持ち、期限切れをCLI出力で
+// 催促する）。カレンダー上の日付は人間の道具であり、AIの判断の契機ではない。
+// AIにとっての契機は**再来**である — 同じ判断の場にもう一度立った瞬間に、
+// 前回何を選び、何を捨て、結果がどうだったかが出てくること。
+//
+// したがってここでは:
+//   - 決定は situation（判断の場）と fingerprint を持ち、記録しようとした瞬間に
+//     コアが過去を突き返す（recall）。読むかどうかを実行者の判断に委ねない
+//   - 前回の結果が未記録のまま同じ場に来たら、その場で埋めろと言う（期限では催促しない）
+//   - 反復して結果が伴った決定は policy.js が方針へ畳み込み、以後は推論なしで発火する
+//
+// 保存層は作らない: 既存の world_model/events.jsonl に追記する。
 // レビュー結果は元のdecisionをsupersedeせず、type: outcome の新Statementを追記して
 // links の derived_from で元へ張る（追記専用: 決定の記録そのものは書き換えない）。
 const store = require('./store');
+const policy = require('./policy');
 
 const OUTCOME_RESULTS = ['met', 'unmet', 'unclear'];
-
-// review_after は「日付」または「イベント名」を取りうる（CONCEPT §8 / TODO C1）。
-// 日付として解釈できるものだけが期限切れ判定の対象になり、イベント指定は人が判断する。
-function parseWhen(v) {
-  if (typeof v !== 'string' || !v.trim()) return null;
-  const ms = Date.parse(v);
-  return Number.isNaN(ms) ? null : ms;
-}
 
 function assertStringArray(v, label) {
   if (v === undefined) return undefined;
@@ -25,39 +28,104 @@ function assertStringArray(v, label) {
   return v;
 }
 
-// 決定を1件記録する。CLI `decision new "<何を決めたか>" --options a,b --chosen a ...` の実体。
+// 同じ判断の場の過去。決定を書く前にも、方針を引く前にも、これを通る。
+function recall(osDir, { situation, options, fingerprint: fp } = {}) {
+  const key = fp || policy.situationFingerprint(situation, options);
+  const bucket = policy.foldByFingerprint(osDir)[key];
+  const prior = bucket ? bucket.decisions : [];
+  const unreviewed = prior.filter((d) => !d.outcomes.length);
+  const messages = [];
+  for (const d of prior) {
+    const r = d.latest_result;
+    messages.push(
+      `前回（${d.id}）はこの場で「${d.chosen || '(未記録)'}」を選んだ` +
+      (r ? `。結果: ${r}` : '。**結果が未記録**')
+    );
+  }
+  // 期限ではなく再来で催促する。同じ判断にもう一度立った今が、前回の答え合わせに
+  // 一番意味がある瞬間である（カレンダー上の日付には意味がない）。
+  if (unreviewed.length) {
+    messages.push(
+      `この判断の場には結果が未記録の決定が${unreviewed.length}件ある（` +
+      `${unreviewed.map((d) => d.id).join(', ')}）。` +
+      '同じ場に戻ってきた今が答え合わせの時である: ' +
+      `node cli/index.js decision outcome <id> --result met|unmet|unclear`
+    );
+  }
+  const hit = policy.match(osDir, { fingerprint: key, log: false });
+  return {
+    fingerprint: key,
+    prior,
+    unreviewed: unreviewed.map((d) => d.id),
+    policy: hit.policy,
+    messages,
+  };
+}
+
+// 決定を1件記録する。書く前に必ず過去を突き返す。
 function newDecision(osDir, body, opts = {}) {
   if (!body || typeof body !== 'string' || !body.trim()) throw new Error('bodyが必要（何を決めたか）');
   const options = assertStringArray(opts.options, 'options');
   const criteria = assertStringArray(opts.criteria, 'criteria');
   const tags = assertStringArray(opts.tags, 'tags');
   const scope = assertStringArray(opts.scope, 'scope');
-  const { chosen, expected_outcome: expectedOutcome, review_after: reviewAfter } = opts;
-  for (const [k, v] of [['chosen', chosen], ['expected_outcome', expectedOutcome], ['review_after', reviewAfter]]) {
+  const { chosen, expected_outcome: expectedOutcome, situation } = opts;
+  for (const [k, v] of [['chosen', chosen], ['expected_outcome', expectedOutcome], ['situation', situation]]) {
     if (v !== undefined && (typeof v !== 'string' || !v.trim())) throw new Error(`${k}は空でない文字列`);
+  }
+  // situation が無いと判断の場を同定できず、再来しても一致しない。
+  // 「何を選ぶ場面か」を1行で抽象化させることが、この層で唯一人（またはAI）に要求する仕事である。
+  if (!situation) {
+    throw new Error('--situation が必要（何を選ぶ場面かを1行で抽象化する。これが無いと同じ判断の再来を検出できない）');
   }
   // 選択肢を列挙したのに選んだ手がその中に無いのは、記録漏れかtypoのどちらか。
   // 後から「何を捨てたか」を辿れなくなるので、書き込む前に落とす。
   if (options && chosen && !options.includes(chosen)) {
     throw new Error(`chosen "${chosen}" が options に含まれない（options: ${options.join(', ')}）`);
   }
+  const fingerprint = policy.situationFingerprint(situation, options);
+  const before = recall(osDir, { fingerprint });
   const st = {
     type: 'decision',
     body,
     status: 'fact',
+    situation,
+    fingerprint,
     options,
     chosen,
     criteria,
     expected_outcome: expectedOutcome,
-    review_after: reviewAfter,
     tags,
     scope,
-    provenance: { source: opts.source || 'decision', method: opts.method || 'human' },
+    provenance: { source: opts.source || 'decision', method: opts.method || 'llm' },
   };
   if (opts.task) st.provenance.task = opts.task;
   for (const k of Object.keys(st)) if (st[k] === undefined) delete st[k];
   const r = store.assertStatements(osDir, [st]);
-  return { id: r.added[0], statement: st, warnings: r.warnings };
+  const out = { id: r.added[0], statement: st, warnings: r.warnings, recall: before };
+  // 方針に反する選択をしたことは違反ではない。ただし黙って通さない —
+  // 方針が現実と合わなくなった最初の兆候がここに出る。
+  if (before.policy && chosen && before.policy.choose !== chosen) {
+    out.contradicts_policy = {
+      fingerprint,
+      policy_choose: before.policy.choose,
+      chosen,
+      message:
+        `確立済みの方針は「${before.policy.choose}」だが「${chosen}」を選んだ。` +
+        '方針を破ること自体は違反ではないが、理由を残すこと。' +
+        `結果が unmet なら方針は自動撤回される`,
+    };
+  }
+  // コンパイル条件を満たしたら、この決定を書いた時点で畳み込む。
+  // 「あとでコンパイルする」経路にすると、誰も走らせないまま資産化されない。
+  const c = policy.compile(osDir, { fingerprint });
+  if (c.compiled.length) {
+    out.compiled_policy = c.compiled[0];
+    out.message =
+      `この判断の場は方針として確立した（${c.compiled[0].choose}）。` +
+      '以後、同じ場では推論なしでこの選択が返る。unmet が1件出れば自動で撤回される';
+  }
+  return out;
 }
 
 // 決定ごとの最新outcome（現在状態にあるもの）を引く索引を作る
@@ -80,33 +148,24 @@ function outcomeIndex(snap) {
   return byDecision;
 }
 
-// 決定一覧。due: true のときは review_after を過ぎていて未レビューのものだけ返す。
-function listDecisions(osDir, { due = false, now } = {}) {
+// 決定一覧。unreviewed: true で結果が未記録のものだけ返す。
+// 「期限切れ」という概念は持たない（日付はAIの判断の契機ではない）。
+function listDecisions(osDir, { unreviewed = false } = {}) {
   const snap = store.getSnapshot(osDir);
   const outcomes = outcomeIndex(snap);
-  const nowMs = now ? Date.parse(now) : Date.now();
   const ids = (snap.indexes.by_type && snap.indexes.by_type.decision) || [];
   const rows = ids.map((id) => {
     const st = snap.statements[id];
     const found = outcomes[id] || [];
     const outcome = found.length ? found[found.length - 1] : null;
-    const dueMs = parseWhen(st.review_after);
     return {
       ...st,
       outcome: outcome ? { id: outcome.id, ts: outcome.ts, result: outcome.result, note: outcome.note } : null,
       reviewed: Boolean(outcome),
-      // 期限がイベント指定（日付として読めない）なら時間では判定しない
-      overdue: dueMs !== null && dueMs <= nowMs,
-      review_after_ms: dueMs,
     };
   });
-  const filtered = due ? rows.filter((r) => r.overdue && !r.reviewed) : rows;
-  return filtered.sort((a, b) => {
-    const av = a.review_after_ms === null ? Infinity : a.review_after_ms;
-    const bv = b.review_after_ms === null ? Infinity : b.review_after_ms;
-    if (av !== bv) return av - bv;
-    return a.id < b.id ? -1 : 1;
-  });
+  const filtered = unreviewed ? rows.filter((r) => !r.reviewed) : rows;
+  return filtered.sort((a, b) => (a.id < b.id ? -1 : 1));
 }
 
 // レビュー結果を記録する。元のdecisionはsupersedeせず、outcomeを追記してderived_fromで張る。
@@ -129,7 +188,7 @@ function recordOutcome(osDir, id, { result, note, source, method, task } = {}) {
     links: [{ role: 'derived_from', to: id }],
     tags: decision.tags,
     scope: decision.scope,
-    provenance: { source: source || 'decision-review', method: method || 'human' },
+    provenance: { source: source || 'decision-review', method: method || 'llm' },
   };
   if (task) st.provenance.task = task;
   for (const k of Object.keys(st)) if (st[k] === undefined) delete st[k];
@@ -142,41 +201,52 @@ function recordOutcome(osDir, id, { result, note, source, method, task } = {}) {
     suggest_feedback: false,
   };
   if (previous) out.previous_outcome = { id: previous.id, result: previous.result };
-  // 期待どおりにならなかった決定は、記録して終わらせない。Failureループへ渡す（§26④）。
   if (result === 'unmet') {
+    // 反証は裁量ではない。unmet が1件出た時点で方針の発火を止める。
+    // 「例外はあるが方針は正しい」と言えてしまうと、方針は反証不能な信念になる。
+    if (decision.fingerprint) {
+      const retracted = policy.retract(osDir, decision.fingerprint, {
+        by: out.id,
+        reason: `決定 ${id} の結果が unmet（${note || '理由未記載'}）`,
+      });
+      if (retracted) {
+        out.retracted_policy = retracted;
+        out.message_policy =
+          `方針「${retracted.situation} → ${retracted.choose}」を撤回した。` +
+          'この判断の場は熟慮に戻る';
+      }
+    }
+    // 期待どおりにならなかった決定は、記録して終わらせない。Failureループへ渡す（§26④）。
     out.suggest_feedback = true;
     out.message = `期待結果を満たさなかった決定（${id}）。ログで終わらせずFailureとして起票せよ: `
       + `autopoiesys feedback "${decision.body}: 期待した ${decision.expected_outcome || '結果'} にならなかった"`;
+  } else if (result === 'met' && decision.fingerprint) {
+    // 反証は「方針どおりにやって外れた」だけではない。**方針に反する選択も met になった**なら、
+    // その判断の場の切り方が現実と合っていない。どちらの選択も正しいなら、
+    // 場を分ける条件が situation に書かれていないということである。
+    const active = policy.getPolicy(osDir, decision.fingerprint);
+    if (active && active.status === 'active' && decision.chosen && active.choose !== decision.chosen) {
+      const frozen = policy.retract(osDir, decision.fingerprint, {
+        by: out.id,
+        reason: `方針は「${active.choose}」だが「${decision.chosen}」も met になった（判断の場の切り方が粗い）`,
+        blockRecompile: true,
+      });
+      out.retracted_policy = frozen;
+      out.message_policy =
+        `方針「${frozen.situation} → ${frozen.choose}」を撤回し、この判断の場を凍結した。` +
+        'どちらの選択も met になるなら、場を分ける条件が situation に書かれていない。' +
+        'situationを切り直してから決定を積み直すこと';
+    } else {
+      // 結果が伴った時点でコンパイル条件を再評価する（畳み込みの契機は結果の記録側にもある）
+      const c = policy.compile(osDir, { fingerprint: decision.fingerprint });
+      if (c.compiled.length) {
+        out.compiled_policy = c.compiled[0];
+        out.message_policy =
+          `この判断の場は方針として確立した（${c.compiled[0].choose}）。以後は推論なしで発火する`;
+      }
+    }
   }
   return out;
 }
 
-// レビュー期限切れの集計（運用ヒント用）。maintenanceHintsから中継できるよう文字列も返す。
-function reviewSummary(osDir, { now } = {}) {
-  const overdue = listDecisions(osDir, { due: true, now });
-  const summary = {
-    due: overdue.length,
-    unreviewed_overdue: overdue.map((d) => {
-      const row = {
-        id: d.id,
-        body: d.body,
-        review_after: d.review_after,
-        chosen: d.chosen,
-        expected_outcome: d.expected_outcome,
-      };
-      // 未記入の欄を undefined のまま出すと、人向け出力に "undefined" が並ぶ
-      for (const k of Object.keys(row)) if (row[k] === undefined) delete row[k];
-      return row;
-    }),
-    hints: [],
-  };
-  if (overdue.length) {
-    summary.hints.push(
-      `レビュー期限切れのdecisionが${overdue.length}件（${overdue.slice(0, 5).map((d) => d.id).join(', ')}`
-      + `${overdue.length > 5 ? ' …' : ''}）: decision outcome <id> --result met|unmet|unclear で照合せよ`
-    );
-  }
-  return summary;
-}
-
-module.exports = { OUTCOME_RESULTS, newDecision, listDecisions, recordOutcome, reviewSummary };
+module.exports = { OUTCOME_RESULTS, newDecision, listDecisions, recordOutcome, recall };

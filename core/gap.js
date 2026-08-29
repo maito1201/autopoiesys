@@ -2,7 +2,7 @@
 // Intelligence Gap Analysis（CONCEPTv2 §6）。
 // Goalノードから requires/depends_on 辺で到達するRequired Intelligenceを、
 // 現在のOS（World Model・evaluators・queries・verdict台帳・goal.yaml）と突合し、
-// AVAILABLE / MISSING / UNCERTAIN / CONFLICTING / STALE / UNVERIFIED に分類する。
+// AVAILABLE / MISSING / UNCERTAIN / CONFLICTING / STALE / UNVERIFIED / UNMET に分類する。
 // 「意味の提案はLLM（decompose-goal Skill）、実在と健全性の判定は決定的コア（本モジュール）」。
 // 分類結果は保存せず毎回再計算する（保存した瞬間にそれ自体がSTALE化するため）。
 const fs = require('node:fs');
@@ -12,7 +12,7 @@ const store = require('./store');
 const { traverseGraph } = require('./query');
 const { loadGoal } = require('./schema');
 
-const CLASSIFICATIONS = ['AVAILABLE', 'MISSING', 'UNCERTAIN', 'CONFLICTING', 'STALE', 'UNVERIFIED'];
+const CLASSIFICATIONS = ['AVAILABLE', 'MISSING', 'UNCERTAIN', 'CONFLICTING', 'STALE', 'UNVERIFIED', 'UNMET'];
 const REQUIRE_KINDS = ['requires', 'depends_on'];
 const BINDING_KINDS = ['evaluated_by', 'measured_by', 'requires', 'depends_on'];
 // 束縛辺（評価器等への接地）を必須とするノード型。claim等の知識ノードはそれ自体が知識であり、
@@ -26,6 +26,8 @@ const KNOWLEDGEISH = ['claim', 'observation', 'hypothesis', 'fact', 'constraint'
 const NEXT_ACTIONS = {
   MISSING: 'decompose-goal で分解を深めるか、build-evaluation-model / build-query-system で資産を作る',
   UNVERIFIED: '証拠を集める（supports リンク）か、束縛evaluatorを一度実行してverdictを残す',
+  // 測って落ちている基準。『測れていない』と同じ扱いにすると、実測した瞬間に未達が見えなくなる
+  UNMET: '最新のverdictがFAIL。fail_reasonがinsufficient_sampleなら手法ではなく標本を足す',
   UNCERTAIN: 'Research / Experiment / Measurement で確信度を上げる（または反証する）',
   CONFLICTING: '矛盾する証拠を突き合わせて解消する（RESOLVE_CONFLICT）',
   STALE: '再検証して supersede するか、retract する',
@@ -37,6 +39,16 @@ function verdictCountByEvaluator(osDir) {
     counts[v.evaluator] = (counts[v.evaluator] || 0) + 1;
   }
   return counts;
+}
+
+// evaluatorごとの最新verdict（タスクを跨いだ最終行。latestVerdictsと同じ規則）。
+// 件数だけを見ると「測って不合格」が「測って問題なし」と同じ枝に落ちる（F010）
+function latestVerdictByEvaluator(osDir) {
+  const latest = {};
+  for (const v of readJsonl(path.join(osDir, 'evaluations', 'log.jsonl'))) {
+    if (v && v.evaluator) latest[v.evaluator] = v;
+  }
+  return latest;
 }
 
 // 1ノードの分類（優先順位つき決定表）。戻り値 {classification, why, bindings}
@@ -140,6 +152,7 @@ function classifyNode(node, ctx) {
 // 既存のunbound可視化をGap Analysisの語彙に統合する
 function goalCriteriaGaps(osDir, verdictCounts) {
   const goal = loadGoal(osDir);
+  const latest = latestVerdictByEvaluator(osDir);
   const items = [];
   if (!goal) return items;
   for (const listName of ['success_criteria', 'constraints']) {
@@ -156,6 +169,12 @@ function goalCriteriaGaps(osDir, verdictCounts) {
       } else if (!verdictCounts[item.evaluator]) {
         classification = 'UNVERIFIED';
         why = `evaluator ${item.evaluator} のverdict記録がゼロ`;
+      } else if (latest[item.evaluator] && latest[item.evaluator].verdict === 'FAIL') {
+        // 実測した結果の不合格。AVAILABLEに吸い込むと、測った瞬間に未達が見えなくなる（F010）
+        const v = latest[item.evaluator];
+        classification = 'UNMET';
+        why = `evaluator ${item.evaluator} の最新verdictがFAIL`
+          + `${v.reason ? `（reason: ${v.reason}）` : ''}${v.ts ? ` / ${v.ts}` : ''}`;
       } else {
         classification = 'AVAILABLE';
         why = `evaluator ${item.evaluator} が実在しverdict記録あり`;

@@ -45,10 +45,12 @@ QueryはOS Builderが領域に応じて設計するものであり、固定API�
 
 ## 同梱Query
 
-`init` が `queries/get_past_decisions.yaml`（過去の決定とレビュー結果）だけを生成する。
-decision / outcome はコアの語彙なので、引く手段までコアが用意する — これが無いと
-決定は「書いたが二度と読まれない記録」になり、Decision Modelがログに退化する。
+`init` が `queries/get_past_decisions.yaml`（過去の決定と結果）だけを生成する。
+decision / outcome はコアの語彙なので、引く手段までコアが用意する。
 ユーザーが編集していれば `init --force` でも上書きしない。
+
+ただし**判断の場で引くのはこのQueryではなく `decision recall` / `policy match` である**。
+Queryは一覧の閲覧用で、再来の検出と方針の発火はコアが決定的に行う（推論もQueryも経ない）。
 
 ## 典型的なQuery（あくまで例 — 領域に合わせて設計する）
 

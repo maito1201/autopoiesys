@@ -45,6 +45,31 @@ function runQueryGoldens(osDir) {
   return results;
 }
 
+// fixture付きcommand checkのスクリプト解決（F008）。
+// fixtureをcwdにして実行すると、evaluatorのargvにある相対パス（scripts/check-X.js）は
+// fixtureの中に解決される。するとfixtureは検出器の複製を持たなければ動かず、
+// その複製はfixture作成時点で凍結される — 本体の検出器を書き換えても golden は
+// 複製に対してPASSを出し続け、検出力テストは自分自身のスナップショットを検証する。
+//
+// ここでは**実行するスクリプトだけ**をrepoRoot側の絶対パスに解決し、cwdはfixtureのままにする。
+// データ引数（'.os' や '.'）はfixtureを指し続ける必要があるからである。
+// fixture内のデータ複製（SCHEMA.md・core/store.js等）は検査対象の入力であって影ではない。
+function resolveScriptAgainstRepo(def, repoRoot, fixtureDir) {
+  if (def.method !== 'command' || !Array.isArray(def.argv) || def.argv.length < 2) return null;
+  const argv = def.argv.map((a) => String(a));
+  if (argv[0] !== 'node' || path.isAbsolute(argv[1])) return null;
+  const inRepo = path.resolve(repoRoot, argv[1]);
+  if (!fs.existsSync(inRepo)) return null;
+  const shadow = path.resolve(fixtureDir, argv[1]);
+  const next = argv.slice();
+  next[1] = inRepo;
+  // 何を実行したかをverdictの記録に残す。これが無いと、影を踏んでいても緑のまま通る
+  const note = fs.existsSync(shadow)
+    ? `実行したスクリプト: ${inRepo}（fixture内に同名の複製があるが実行していない: ${shadow}）`
+    : `実行したスクリプト: ${inRepo}`;
+  return { def: { ...def, argv: next }, note };
+}
+
 function runGoldenCheck(osDir, check, { repoRoot }) {
   const def = loadEvaluatorDef(osDir, check.evaluator);
   const expected = check.expected || check.replay;
@@ -62,11 +87,25 @@ function runGoldenCheck(osDir, check, { repoRoot }) {
     if (check.fixture && !fs.existsSync(workDir)) {
       return { evaluator: check.evaluator, expected, actual: 'UNCERTAIN', pass: false, evidence: [`fixtureが存在しない: ${check.fixture}`] };
     }
+    let runDef = def;
+    let scriptNote = null;
+    if (check.fixture) {
+      const resolved = resolveScriptAgainstRepo(def, repoRoot, workDir);
+      if (resolved) {
+        runDef = resolved.def;
+        scriptNote = resolved.note;
+      } else if (def.method === 'command') {
+        // 解決できない形（node以外の実行体・絶対パス）を黙って落とさない。
+        // 静かなフォールバックは、F008が起きた経路そのものである
+        scriptNote = 'note: 実行スクリプトを本体側へ解決していない（argvがnodeスクリプトの相対パスでない）。'
+          + 'fixture内に同名のファイルがあればそちらが実行される';
+      }
+    }
     const r = def.method === 'deterministic'
-      ? runDeterministic(osDir, def, { workDir })
-      : runCommand(def, { workDir });
+      ? runDeterministic(osDir, runDef, { workDir })
+      : runCommand(runDef, { workDir });
     actual = r.verdict;
-    evidence = r.evidence;
+    evidence = scriptNote ? [scriptNote, ...r.evidence] : r.evidence;
   }
   return {
     evaluator: check.evaluator,
@@ -213,6 +252,20 @@ function maintenanceHints(osDir, { now } = {}) {
     );
   }
 
+  // 完了したのに蒸留されていないタスク。経験が生ログのまま消えかけている状態を
+  // 黙って通すと、次に同種の仕事をするセッションはまたゼロから考えることになる
+  try {
+    for (const t of require('./taskclass').unconsolidatedDone(osDir)) {
+      hints.push(
+        `警告: ${t.id} は完了したが何を学んだか未記録。` +
+        `node cli/index.js task consolidate ${t.id} --lessons <S00x,...> で蒸留するか、` +
+        '--none-learned "<理由>" で学びなしを開示すること'
+      );
+    }
+  } catch {
+    // taskclass未整備でも主機能を止めない
+  }
+
   for (const t of openTasksWithoutVerdicts(osDir)) {
     hints.push(
       `警告: ${t.id} の評価が未実行（未記録のevaluator: ${t.missing.join(', ')}）。` +
@@ -220,14 +273,22 @@ function maintenanceHints(osDir, { now } = {}) {
     );
   }
 
-  // レビュー期限を過ぎた決定（C1）。決定を記録しただけで結果と照合しないなら、
-  // それは「保存して終わる」のと同じでループが閉じない（§26④）。
+  // goalの最終検証（F005）。期限（日付）ではなく事象で催促する: 前回のgoal監査以降に
+  // 完了したタスクが3件を超えたら、goal憲章そのものの検証を促す。
+  // 検証者は独立サブエージェント — ユーザーにしか検証できないのは未記録の意図だけである
   try {
-    for (const h of require('./decision').reviewSummary(osDir, { now }).hints) {
-      hints.push(`ヒント: ${h}`);
+    const audits = readJsonl(path.join(osDir, 'observations', 'goal_audit.jsonl'));
+    const lastAudit = audits.length ? audits[audits.length - 1].ts : null;
+    const doneSince = Object.values(require('./evaluate').loadTasks(osDir))
+      .filter((t) => t.status === 'done' && (!lastAudit || t.ts > lastAudit)).length;
+    if (doneSince >= 3) {
+      hints.push(
+        `ヒント: ${lastAudit ? '前回のgoal監査以降に' : 'goal監査が一度も無いまま'}タスクが${doneSince}件完了している。` +
+        'node cli/index.js audit goal でbriefingを生成し、独立サブエージェントに憲章の照準を反証させよ'
+      );
     }
   } catch {
-    // World Modelが未整備でも主機能を止めない
+    // ignore
   }
 
   for (const f of Object.values(loadFailures(osDir))) {

@@ -499,6 +499,33 @@ function newTask(osDir, objective, evaluators, extra = {}) {
   if (extra.repo_dirs && Object.keys(extra.repo_dirs).length) entry.repo_dirs = extra.repo_dirs;
   if (extra.refs && extra.refs.length) entry.refs = extra.refs;
   if (extra.context) entry.context = extra.context;
+  // タスク類型（1行の抽象）。同種のタスクの再来を検出し、過去の経験を黙っていても
+  // 届けるための鍵。fingerprintの計算はtaskclass側に寄せる（decisionのsituationと同じ規則）
+  if (extra.class) {
+    entry.class = extra.class;
+    entry.class_fp = require('./taskclass').classFingerprint(extra.class);
+  }
+  // 由来（F005 A-3）: 何がこの仕事を要求したか（agenda:… / failure:F00x / lesson:S00xx / user）。
+  // 「指示なしの推進」を主張可能にする唯一の機械記録。
+  //
+  // 申告のままでは、任意の文字列を書くだけで自発的推進の証拠になってしまう（sc-007の穴）。
+  // OS由来を名乗るなら、名指しされた項目が台帳に実在することをここで解決し、
+  // 解決結果をタスクに焼き込む（後でその項目が解決・消滅しても、要求された事実は残る）。
+  // 解決できない由来は**登録時に失敗させる** — evaluatorの実行先が決まらないときと同じ規律で、
+  // 誤った記録を残すより登録を止める方が安全である。
+  if (extra.origin) {
+    entry.origin = extra.origin;
+    const res = require('./agenda').resolveOrigin(osDir, extra.origin);
+    if (res && !res.resolved) {
+      throw new Error(
+        `由来を解決できない: ${extra.origin} — ${res.why}。` +
+        '実在する項目を指すか、--origin user（指示された仕事）と書くこと'
+      );
+    }
+    if (res && res.resolved && res.self_directed) {
+      entry.origin_verified = { kind: res.kind, ref: res.ref, via: res.via, ts: entry.ts };
+    }
+  }
   // 実行先が決まらないevaluatorを登録させない（登録時に落とす方が、評価時に誤ったdirで
   // PASSを出すより安全。評価Evaluatorの選定を後から緩めるのは禁止という規律とも整合する）
   const missing = [];
@@ -611,6 +638,12 @@ function evaluateTask(osDir, taskId, { only, workDir, replay } = {}) {
     const r = def.method === 'deterministic'
       ? runDeterministic(osDir, def, { workDir: effectiveWorkDir })
       : runCommand(def, { workDir: effectiveWorkDir });
+    // fail_reason宣言（F005 A-1）: 検出器が「入力が足りず原理的に届かない」を表現できるようにする。
+    // insufficient_sampleのFAILはnext-actionでFIXでなくCOLLECT_EVIDENCEへ写る —
+    // 「直せ」ではなく「日を重ねて測れ」が正しい指示である基準（sc-005等）のための経路
+    if (r.verdict === 'FAIL' && !r.reason && def.fail_reason && REASONS.includes(def.fail_reason)) {
+      r.reason = def.fail_reason;
+    }
     const entry = recordVerdict(osDir, {
       task: taskId,
       evaluator: evId,
@@ -801,9 +834,13 @@ function unmeasuredCriteria(osDir) {
   } catch {
     return []; // goal.yaml未整備でも完了判定そのものは止めない
   }
+  // 「測れていない」と「測った結果、不合格」を同じ語で呼ばない。
+  // 実測した瞬間に未達が caveats から消えると、目的未達のまま完全なDONEに見える（F005/F010）
   return analysis.required
-    .filter((r) => r.classification === 'MISSING' || r.classification === 'UNVERIFIED')
-    .map((r) => `${r.id}「${r.body}」は現在測定できていない（${r.classification}: ${r.why}）`);
+    .filter((r) => ['MISSING', 'UNVERIFIED', 'UNMET'].includes(r.classification))
+    .map((r) => (r.classification === 'UNMET'
+      ? `${r.id}「${r.body}」は測定した結果、現在不合格である（UNMET: ${r.why}）`
+      : `${r.id}「${r.body}」は現在測定できていない（${r.classification}: ${r.why}）`));
 }
 
 module.exports = {

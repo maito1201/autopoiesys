@@ -62,9 +62,6 @@ constraints:
     statement: (絶対にやってはいけないこと)
     severity: hard
     evaluator: unbound
-autonomy:
-  escalate_on:
-    - (人間に委ねる条件)
 optimization:
   - correctness
 sources:
@@ -111,7 +108,7 @@ pipeline:
   - where: { status: [fact, hypothesis] }
   # outcomeは derived_from で決定を指す。in方向に辿ると「その決定がどうなったか」が付く
   - expand: { roles: [derived_from], direction: in, limit: 3 }
-  - project: [id, body, chosen, options, criteria, expected_outcome, review_after, tags, linked]
+  - project: [id, body, situation, fingerprint, chosen, options, criteria, expected_outcome, tags, linked]
   - limit: 20
 max_tokens: 1500
 `;

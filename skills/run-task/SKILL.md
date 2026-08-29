@@ -23,14 +23,42 @@ Task → Code → Done ではなく、Objective → Plan → Execute → Evaluat
 
 ## 手順
 
+0. **新しいセッション（文脈）の最初の仕事なら、文脈の開始を宣言する**:
+
+       node cli/index.js session begin --note "<何のセッションか>"
+
+   知性の測定断面は暦日ではなく文脈境界である。この宣言が無いと、以後の記録が
+   前の文脈に混ざり、「経験が文脈を跨いで再利用された」証拠が永久に作れない。
+   同じ会話の中で2回宣言する必要はない。
+
 1. タスクを登録する。適用するEvaluatorをこの時点で決める
    （goal.yamlの関連するsuccess_criteria / constraintsのevaluatorを含めること）。
    作業対象ディレクトリ（worktree等）と参照（Issue/PR URL）も登録する —
    **継続性の正本は会話ではなくタスク台帳**であり、別プロセスがresumeしても
    `task show` だけで再開できる状態を保つ:
 
-       node cli/index.js task new "<objective>" --evaluators <e1>,<e2> \
-         --repos <scope>[=<dir>],... --refs <issue-url>
+       node cli/index.js task new "<objective>" --class "<何をするタスクか（1行の抽象）>" \
+         --origin <agenda:項目 | failure:F00x | lesson:S00xx | user> \
+         --evaluators <e1>,<e2> --repos <scope>[=<dir>],... --refs <issue-url>
+
+   `--origin` は「何がこの仕事を要求したか」の開示。agendaが挙げた仕事なら
+   `agenda:<項目のref>`、ユーザーの指示なら user。無くても登録は通るがヒントで促される —
+   これが無いと「指示なしの推進」を後から機械記録で検証できない。
+   OS由来（agenda: / failure: / lesson: / unknown:）を名乗ると、指した項目が台帳に
+   実在するかを登録時に照合し、**解決できなければ登録が失敗する**。接頭辞つきの
+   文字列を打つだけで自発的推進の証拠になってしまうのを防ぐためで、
+   強制しているのは参照の解決可能性であって由来の正しさではない。
+
+   **`--class` が日々の成長の鍵である。** 同種の仕事の再来はこの1行の抽象で検出され、
+   過去の同種タスク・そこで生まれた教訓・効いた/外れたの実績が、**聞かなくても**
+   task newの出力に届く（自分が何を思い出せていないかは自分では分からないため、
+   想起は機械が押し付ける）。届いた経験は目を通してから作業に入ること。
+   取捨は実行者の判断でよいが、外れた実績のある教訓に逆らうなら理由を成果物に書く。
+
+   一回きりの仕事なら `--class` は省略してよい。省略すると、既存の類型との
+   語の重なりが候補として提示される — 実は再来だったなら付け直す:
+
+       node cli/index.js task brief <id>   # 途中からでも想起の束を取り直せる
 
    **横断が常態なので、触るリポジトリはすべて `--repos` に登録する**（1つでも登録する）。
    scope名は goal.yaml sources に登録されているもの（`node cli/index.js query` の前に
@@ -59,8 +87,8 @@ Task → Code → Done ではなく、Objective → Plan → Execute → Evaluat
        # ② ドメイン知識と既知の失敗パターン（scopeに依らない横断共通知識）
        node cli/index.js query <制約系Query> --param tag=<領域タグ>
        node cli/index.js query <失敗パターン系Query> --param tag=<領域タグ>
-       # ②' 過去の決定とその結果（同じ判断を二度目にするとき、前回何が起きたかを見る）
-       node cli/index.js query get_past_decisions
+       # ②' 判断の場に立ったら、決める前に引く（推論ゼロ。最も安い経路）
+       node cli/index.js decision recall "<何を選ぶ場面か>" --options <a,b>
        # ③ 横断契約（触る組み合わせごと）
        node cli/index.js query get_cross_repo_contract --param repo_a=<A> --param repo_b=<B>
 
@@ -72,8 +100,10 @@ Task → Code → Done ではなく、Objective → Plan → Execute → Evaluat
    - ②は `tag` で絞る（カンマ区切りはOR）。ここでリポジトリ名を渡す必要はない
    - ③が0件なのは「まだ記録されていない」意味であって「契約が無い」意味ではない。
      実装中に契約を見つけたら手順4で還流する
-   - **②' は「似た判断を過去にしたか」を引く。** 決定には結果（met / unmet / unclear）が
-     付いている。同じ選択肢を前回選んで unmet だったなら、今回選び直す理由を書くこと
+   - **②' は判断のたびに引く。** LLM推論をまったく使わない経路なので、
+     引かない理由が無い。同じ場を前に通っていれば前回の選択と結果が返り、
+     方針として確立していれば選択そのものが返る（`policy`）。
+     前回 unmet だった選択を今回また採るなら、その理由を成果物に書くこと
 
 3. 計画・実行（T1-T2）。**成果物は初見の読者がコンテキストなしで読解できるかを推敲してから**
    登録する: 制作過程の記述（「初版は〜と判断したが」等）・セッション文脈への依存・内部タスクIDを
@@ -124,14 +154,18 @@ Task → Code → Done ではなく、Objective → Plan → Execute → Evaluat
 
    裏取りできていないものは status=hypothesis（--confidence必須）で書くか、書かない。
 
-   **後から効く判断をしたら、決定として残す**（何を選んだかだけでなく、何を捨てたか・
-   何を期待したか・いつ答え合わせするかを持たせる）:
+   **後から効く判断をしたら、決定として残す。** `--situation`（何を選ぶ場面かの1行の抽象）が
+   必須で、これが同じ判断の再来を検出する鍵になる。日付の期限は持たせない:
 
-       node cli/index.js decision new "<何を決めたか>" --options <a,b> --chosen <a> \
-         --criteria "<判断基準>" --expected "<期待した結果>" --review-after <日付> --task <id>
+       node cli/index.js decision new "<何を決めたか>" --situation "<何を選ぶ場面か>" \
+         --options <a,b> --chosen <a> --criteria "<判断基準>" --expected "<期待した結果>" --task <id>
 
-   期待どおりにならなかった決定は `decision outcome <id> --result unmet` で記録する。
-   コアが「Failureとして起票せよ」と促すので、ログで終わらせない。
+   結果が分かったら `decision outcome <id> --result met|unmet|unclear` で記録する。
+   unmet ならコアが「Failureとして起票せよ」と促すので、ログで終わらせない。
+
+   **situationの切り方がこの層の質を決める。** 粗すぎると、どちらの選択も met になって
+   場が凍結される（コアがそう告げる）。細かすぎると二度と再来せず、何も畳み込まれない。
+   凍結を告げられたら、場を分けている条件をsituationに書き込んで切り直すこと。
 
 5. **完了報告のドラフトを書き、実装と一緒にartifact登録してから**、独立評価を要求する。
    完了報告（実行した検証コマンドと結果・要件との対応・未実施事項）を評価対象とする
@@ -162,7 +196,7 @@ Task → Code → Done ではなく、Objective → Plan → Execute → Evaluat
 
    | 結果 | 行動 |
    |---|---|
-   | DONE | 完了。ユーザーに報告 |
+   | DONE | **手順6.5（蒸留）を済ませてから**完了報告 |
    | FIX | 修正して手順3-6を繰り返す |
    | INVESTIGATE | 原因を調査して再評価 |
    | COLLECT_EVIDENCE | 不足している証拠を集める（Query追加が必要なら提案） |
@@ -173,6 +207,46 @@ Task → Code → Done ではなく、Objective → Plan → Execute → Evaluat
    これは記録から導かれた昇格であって好みではない（同じevaluatorがUNCERTAINを2回出した・
    判定が往復した・未消化の未知Failureがある、のいずれかが起きている）。
    特に**判定の往復は全PASSでもDONEにならない** — 覆った理由を調べずに完了にしないため。
+
+6.5. **経験を蒸留してから完了報告する。** タスクをやって何も書き残さないのは、
+   経験を生ログのまま捨てることであり、次に同種の仕事をする自分（別セッションの自分）は
+   またゼロから考えることになる。
+
+   まず教訓を1行ずつ残す（「次に同種の仕事をするとき使える形」に自分で蒸留する。
+   機械は蒸留の中身を決めない）:
+
+       node cli/index.js statement add "<教訓の1行>" --type lesson \
+         --when "<いつ効くか>" --task-class <class_fp> --source <裏取り元> --task <id>
+
+   次に、開始時に届いた教訓のどれが効き、どれが外れたかを申告して締める:
+
+       node cli/index.js task consolidate <id> --lessons <S00x,S00y> \
+         --helped <S00a> --misled <S00b> --unapplied <S00c> --unapplied-reason "<理由>"
+
+   処遇は3値である。**教訓は正しいが適用しなかった**（適用場面があったのに使わなかった・
+   使い損ねた）場合は `--unapplied` で理由つきで開示する — これを `--misled` と書くと
+   正しい教訓が反証で引退し、無申告だと事象が台帳から消える（F009の実測: 「件数は
+   一次記録で確定させる」という教訓が2タスク連続で配信されながら適用されず、
+   報告の数字が2回とも誤った）。
+   外れた教訓（--misled）は反証として書き戻され、外れの記録が上回った教訓は
+   以後の想起から外れる。**強制されるのは開示であって内容ではない** — 本当に学びが
+   無かったなら `--none-learned "<理由>"` で通る。無言だけが許されない
+   （完了済みで未蒸留のタスクは運用ヒントが警告し続ける）。
+
+   良い教訓の目安: 「このリポジトリではXをする前にYを確認する」「Z形式の測定は
+   時間軸の逆行を先に検査する」のように、**次の実行者が行動を変えられる1行**。
+   「頑張った」「難しかった」は教訓ではない。
+
+   最後に、**その申告を自分で確定させない**。helped/misled は申告者=実行者のままなので、
+   台帳の機械記録だけを別文脈の判定者に渡して整合を見る:
+
+       node cli/index.js experience audit <id>
+
+   出たbriefingを**新規サブエージェント**（この会話の履歴を持たないこと）に渡し、
+   申告1件ごとに `experience audit-record` で記録させる。briefingには台帳の機械記録
+   （成果物の登録時刻・verdict・想起の配信ログ・事前固定した手順）と申告そのものしか
+   入らない — 完了報告の本文を読ませると、申告の説明で申告を判定することになるためである。
+   記録に現れないだけなら `insufficient`（`contradicted` は記録と食い違うときだけ）。
 
 7. ループ中に「必要なQueryが無い」「必要なEvaluatorが無い」と気づいたら、
    その場しのぎをせず `.os/proposals/` に提案を書く（OSの穴はOSの資産にする）。
@@ -197,6 +271,8 @@ CLI出力に「ヒント:」「警告:」で始まる行（regression推奨・Fa
 ## 禁止事項
 
 - 自分の判断でタスクをDONE扱いにすること（next-actionがDONEを返すまで完了ではない）
+- 蒸留（task consolidate）を飛ばして完了報告すること（経験を捨てる行為。
+  学びが無いなら --none-learned で理由を開示する）
 - 評価器を一度も実行しないまま完了報告を書くこと（「評価が未実行」警告が出ている状態での報告）
 - next-actionのcaveatsを完了報告から省くこと
 - Queryを経由しない文脈収集（.os/world_model/ の直接読み込み）

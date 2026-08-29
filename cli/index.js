@@ -17,8 +17,14 @@ const scaffold = require('../core/scaffold');
 const knowledge = require('../core/knowledge');
 const gap = require('../core/gap');
 const decision = require('../core/decision');
+const policy = require('../core/policy');
 const routing = require('../core/routing');
 const plan = require('../core/plan');
+const taskclass = require('../core/taskclass');
+const experience = require('../core/experience');
+const growth = require('../core/growth');
+const agendaMod = require('../core/agenda');
+const claimaudit = require('../core/claimaudit');
 
 function parseArgs(argv) {
   const positional = [];
@@ -63,6 +69,14 @@ function requireOsDir(flags) {
 
 function readJsonFile(p) {
   return JSON.parse(fs.readFileSync(path.resolve(String(p)), 'utf8'));
+}
+
+function readTextSafe(p) {
+  try {
+    return fs.readFileSync(p, 'utf8').trim();
+  } catch (e) {
+    return `(読めない: ${e.message})`;
+  }
 }
 
 // 主要コマンドのついでに運用ヒント（そろそろregression等）を1〜数行出す。
@@ -209,6 +223,9 @@ const COMMANDS = {
       // 何の判断を塞いでいるか・どれだけ効くかで並べ替えられるようにする
       blocks: args.flags.blocks ? String(args.flags.blocks).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
       importance: args.flags.importance !== undefined ? Number(args.flags.importance) : undefined,
+      // type: lesson 専用。適用条件とタスク類型が、再来時の自動想起の鍵になる
+      when: args.flags.when ? String(args.flags.when) : undefined,
+      task_class: args.flags['task-class'] ? String(args.flags['task-class']) : undefined,
       source: String(args.flags.source),
       method: args.flags.method ? String(args.flags.method) : undefined,
       task: args.flags.task ? String(args.flags.task) : undefined,
@@ -377,7 +394,70 @@ const COMMANDS = {
   audit(args) {
     const osDir = requireOsDir(args.flags);
     const sub = args.positional[0] || 'reachability';
-    if (sub !== 'reachability') throw new Error('使い方: autopoiesys audit reachability');
+    // goalの最終検証（F005由来・ユーザー指示）: goal憲章そのものを、生成側の会話履歴を
+    // 持たない独立サブエージェントに敵対的に検証させる。評価器がobjectiveを見るのに対し、
+    // これはgoal.yaml自体が「記録された意図」をencodeしているかを見る — 検証スタックの最上層。
+    // ユーザーにしか検証できないのは、まだどこにも記録されていない意図だけである
+    if (sub === 'goal') {
+      const logFile = path.join(osDir, 'observations', 'goal_audit.jsonl');
+      if (args.flags['verdict-file']) {
+        const v = readJsonFile(args.flags['verdict-file']);
+        const errs = [];
+        if (!['PASS', 'FAIL', 'UNCERTAIN'].includes(v.verdict)) errs.push('verdictは PASS|FAIL|UNCERTAIN');
+        if (!Array.isArray(v.evidence) || !v.evidence.length) errs.push('evidenceは1件以上必須');
+        if (errs.length) throw new Error(`goal監査verdict検証エラー:\n  ${errs.join('\n  ')}`);
+        const entry = { ts: util.nowIso(), verdict: v.verdict, evidence: v.evidence, rationale: v.rationale || '', briefing: v.briefing || '' };
+        util.appendJsonl(logFile, entry);
+        out(entry, args.flags);
+        if (v.verdict === 'FAIL') {
+          process.stdout.write('\n警告: goal憲章が記録された意図とずれている。ログで終わらせずFailureとして起票し、goal.yamlを直すこと\n');
+        }
+        return 0;
+      }
+      const lines = ['# goal監査依頼: goal憲章は記録された意図をencodeしているか', ''];
+      lines.push('あなたは独立監査者である。生成エージェントの会話履歴・自己申告は参照せず、');
+      lines.push('このbriefingの内容だけを根拠に、**反証を探す姿勢で**判定せよ。');
+      lines.push('');
+      lines.push('## 検証する問い');
+      lines.push('1. goal.yamlのgoal文は、下の「記録された意図」と矛盾・欠落なく整合しているか');
+      lines.push('2. success_criteriaはgoalそのものを測っているか。それとも測定可能な代理');
+      lines.push('   （例:「改善している」を「系列が存在する」に置換）へすり替わっていないか');
+      lines.push('3. goalの一部が、どの基準にも紐づかず黙って落ちていないか');
+      lines.push('');
+      lines.push('## goal.yaml（現物）');
+      lines.push('```yaml');
+      lines.push(readTextSafe(path.join(osDir, 'goal.yaml')));
+      lines.push('```');
+      lines.push('## 記録された意図・制約（World Modelより。memory由来を含む）');
+      for (const q of ['get_knowledge', 'get_repo_playbook']) {
+        try {
+          const res = query.runQuery(osDir, q, {});
+          for (const row of res.results || []) lines.push(`- [${row.id}] ${row.body}`);
+        } catch (e) {
+          lines.push(`(Query ${q} 実行エラー: ${e.message})`);
+        }
+      }
+      lines.push('');
+      lines.push('## 未消化のFailure（意図とのずれの兆候）');
+      const failures = Object.values(failure.loadFailures(osDir))
+        .filter((f) => !['implemented', 'accepted_risk'].includes(f.state));
+      lines.push(failures.length
+        ? failures.map((f) => `- ${f.id}(${f.state}): ${f.symptom}`).join('\n')
+        : '(なし)');
+      lines.push('');
+      lines.push('## 出力方法');
+      lines.push('判定JSON（verdict: PASS|FAIL|UNCERTAIN, evidence: [根拠。goal.yamlの行と意図IDの対応で], rationale）を');
+      lines.push('一時ファイルに書き、次で記録せよ:');
+      lines.push('');
+      lines.push('    node cli/index.js audit goal --verdict-file <判定JSONのパス>');
+      lines.push('');
+      const seq = util.readJsonl(logFile).length + 1;
+      const file = path.join(osDir, 'briefings', `goal-audit-${String(seq).padStart(3, '0')}.md`);
+      fs.writeFileSync(file, lines.join('\n') + '\n', 'utf8');
+      out({ briefing: file, message: '独立サブエージェント（生成側の会話履歴を持たないこと）にこのbriefingだけを渡し、判定を記録させよ' }, args.flags);
+      return 0;
+    }
+    if (sub !== 'reachability') throw new Error('使い方: autopoiesys audit reachability|goal [--verdict-file <json>]');
     const r = query.auditReachability(osDir);
     out({
       statement_count: r.statement_count,
@@ -418,7 +498,7 @@ const COMMANDS = {
     const sub = args.positional[0];
     if (sub === 'new') {
       const objective = args.positional.slice(1).join(' ');
-      if (!objective) throw new Error('使い方: autopoiesys task new "<objective>" --evaluators a,b [--repos <scope>[=<dir>],...] [--work-dir D] [--refs url1,url2] [--context "..."]');
+      if (!objective) throw new Error('使い方: autopoiesys task new "<objective>" --evaluators a,b [--repos <scope>[=<dir>],...] [--origin <agenda:ref|failure:F00x|lesson:S00xx|unknown:S00xx|user>] [--class \"...\"] [--work-dir D] [--refs url1,url2] [--context "..."]');
       const evaluators = args.flags.evaluators ? String(args.flags.evaluators).split(',').map((s) => s.trim()).filter(Boolean) : [];
       // --repos: 横断タスクが触るリポジトリ。scope→作業ディレクトリの対応を作る。
       // =dir を省略した場合は goal.yaml sources のrepoを使う（worktreeで作業する場合は明示する）
@@ -444,8 +524,96 @@ const COMMANDS = {
         work_dir: args.flags['work-dir'] ? path.resolve(String(args.flags['work-dir'])) : undefined,
         refs: args.flags.refs ? String(args.flags.refs).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
         context: args.flags.context ? String(args.flags.context) : undefined,
+        class: args.flags.class ? String(args.flags.class) : undefined,
+        origin: args.flags.origin ? String(args.flags.origin) : undefined,
       });
       out(t, args.flags);
+      // 由来の開示（F005 A-3）。内容は強制しない — 無いことだけを告げる。
+      // これが無いと「agendaが駆動した仕事」が機械記録にならず、指示なし推進（C4）が
+      // 永久に照合不能のままになる
+      if (!t.origin) {
+        process.stdout.write('\nヒント: このタスクの由来が未記録。--origin <agenda:項目 | failure:F00x | lesson:S00xx | unknown:S00xx | user> で、何がこの仕事を要求したかを開示せよ\n');
+      } else if (t.origin_verified) {
+        // 解決できた由来だけが自発的推進（sc-007）の証拠になる。解決の事実をその場で見せる
+        process.stdout.write(`\nOS由来として解決した: ${t.origin_verified.ref}（${t.origin_verified.via}）\n`);
+      }
+      // 想起は押し付ける。自分が何を思い出せていないかは自分では分からないので、
+      // 「必要なら聞く」に任せると一番必要なときに一番落ちる
+      try {
+        if (t.class_fp) {
+          const d = experience.digest(osDir, t);
+          process.stdout.write('\n' + d.lines.join('\n') + '\n');
+          // 想起の配信を機械記録する。これが無いと「教訓が届いた」ことの証拠が
+          // 実行者の記憶にしか無く、経験再利用の検証が原理的に閉じない（T009監査）
+          experience.logDigest(osDir, t.id, d);
+        } else {
+          // 類型なし = 一回きり宣言。ただし実は再来だった場合に気づける材料は出す
+          const sug = taskclass.suggestClasses(osDir, objective).slice(0, 3);
+          if (sug.length) {
+            process.stdout.write('\nヒント: 既存の類型に近い（実は再来なら --class を付け直すこと）:\n'
+              + sug.map((s) => `  - ${s.class}（過去: ${s.tasks.join(', ')}）`).join('\n') + '\n');
+          }
+        }
+      } catch (e) {
+        process.stdout.write(`\n（想起の組み立てに失敗: ${e.message}）\n`);
+      }
+      printHints(osDir);
+      return 0;
+    }
+    // 想起の束を取り直す（コンパクション・プロセス交代後の再開用）
+    if (sub === 'brief') {
+      const id = args.positional[1];
+      if (!id) throw new Error('使い方: autopoiesys task brief <id>');
+      const t = evaluate.getTask(osDir, id);
+      const d = experience.digest(osDir, t);
+      process.stdout.write(d.lines.join('\n') + '\n');
+      experience.logDigest(osDir, id, d);
+      return 0;
+    }
+    // 蒸留。強制されるのは開示であって内容ではない（--none-learned で「学びなし」も通る）
+    if (sub === 'consolidate') {
+      const id = args.positional[1];
+      if (!id) throw new Error('使い方: autopoiesys task consolidate <id> --lessons <S00x,...> [--helped <S00a,...>] [--misled <S00b,...>] [--unapplied <S00c,...> --unapplied-reason "<理由>"] [--none-learned "<理由>"] [--note "<補足>"]');
+      const list = (v) => (v ? String(v).split(',').map((s) => s.trim()).filter(Boolean) : []);
+      const helped = list(args.flags.helped);
+      const misled = list(args.flags.misled);
+      // unapplied = 配信され適用場面もあったが適用しなかった（F009）。教訓に極性は張らない
+      const unapplied = list(args.flags.unapplied);
+      // 台帳に「効いた/外れた」と書くなら、evidenceの書き戻しも必ず伴わせる。
+      // 記録だけ書いてフィードバックを書かない経路を残すと、教訓の実績数が嘘になる
+      const r = taskclass.recordConsolidation(osDir, id, {
+        lessons: list(args.flags.lessons),
+        helped,
+        misled,
+        unapplied,
+        unapplied_reason: args.flags['unapplied-reason'] ? String(args.flags['unapplied-reason']) : undefined,
+        none_learned: args.flags['none-learned'] ? String(args.flags['none-learned']) : undefined,
+        note: args.flags.note ? String(args.flags.note) : undefined,
+      });
+      let fb = null;
+      if (helped.length || misled.length) {
+        fb = experience.feedback(osDir, { helped, misled, task: id, source: 'task-consolidate' });
+      }
+      out({ task: id, consolidated: r.consolidated || r, feedback: fb ? fb.added : [] }, args.flags);
+      // 蒸留の被覆検査（F005 A-4）: 配信された教訓に処遇（helped/misled）が無いものを告げる。
+      // 自己申告の真偽は検証できないが、**無申告は機械検出できる** — 「届いたが黙って
+      // 無視された」を可視化する。処遇の強制ではない（無視してよいが、無言では通さない）
+      try {
+        const delivered = new Set();
+        for (const c of util.readJsonl(path.join(osDir, 'observations', 'context_log.jsonl'))) {
+          if (c.kind === 'digest' && c.task === id) for (const l of c.lessons || []) delivered.add(l);
+        }
+        const disposed = new Set([...helped, ...misled, ...unapplied]);
+        const silent = [...delivered].filter((l) => !disposed.has(l)).sort();
+        if (silent.length) {
+          process.stdout.write(
+            `\nヒント: 配信されたのに処遇の無い教訓が${silent.length}件（${silent.join(', ')}）。` +
+            '効いたなら --helped、外れたなら --misled、使わなかったなら--noteに理由を残すこと\n'
+          );
+        }
+      } catch {
+        // 被覆検査の失敗で蒸留そのものを止めない
+      }
       printHints(osDir);
       return 0;
     }
@@ -504,7 +672,7 @@ const COMMANDS = {
       out({ task: id, evaluators }, args.flags);
       return 0;
     }
-    throw new Error('使い方: autopoiesys task new|list|show|note|artifact|plan|plan-verify|set-evaluators');
+    throw new Error('使い方: autopoiesys task new|brief|list|show|note|artifact|plan|plan-verify|consolidate|set-evaluators');
   },
 
   evaluate(args) {
@@ -554,21 +722,54 @@ const COMMANDS = {
     return 0;
   },
 
-  // 決定を「選択肢・基準・期待結果・レビュー期限」を持つ構造として残し、期限後に
-  // 結果と照合する（CONCEPT §8）。保存だけして照合しないなら、それはログである。
+  // 文脈境界の宣言（F007由来）。知性・経験再利用の検証で効く変数は暦日ではなく
+  // 文脈の分離（会話履歴を共有しない別プロセスか）である。セッションの開始を台帳に
+  // 宣言することで、以後の全記録（タスク・教訓・配信）がtsで文脈に割り当てられる。
+  // 宣言を忘れると文脈が過少計上され、知性の基準（sc-005/006）は不合格側に倒れる
+  // — 偽の知性を作る方向には壊れない（fail-safe）
+  session(args) {
+    const osDir = requireOsDir(args.flags);
+    const sub = args.positional[0];
+    const file = path.join(osDir, 'observations', 'sessions.jsonl');
+    if (sub === 'begin') {
+      const rows = util.readJsonl(file);
+      const entry = { ts: util.nowIso(), n: rows.length + 1, note: args.flags.note ? String(args.flags.note) : undefined };
+      if (entry.note === undefined) delete entry.note;
+      util.appendJsonl(file, entry);
+      out({ session: entry.n, ts: entry.ts, message: 'この文脈の開始を宣言した。以後の記録はこの文脈に割り当てられる' }, args.flags);
+      printHints(osDir);
+      return 0;
+    }
+    if (sub === 'list' || sub === undefined) {
+      out(util.readJsonl(file), args.flags);
+      return 0;
+    }
+    throw new Error('使い方: autopoiesys session begin [--note "<何のセッションか>"] | session list');
+  },
+
+  // 決定は判断の場（situation）に紐づく。記録しようとした瞬間にコアが過去を突き返し、
+  // 反復して結果が伴えば方針へ畳み込まれる。支援対象はAI自身であって人間ではないので、
+  // 期限や催促のような人間向けの装置は持たない（契機は日付ではなく再来である）。
   decision(args) {
     const osDir = requireOsDir(args.flags);
     const sub = args.positional[0];
     const list = (v) => (v ? String(v).split(',').map((s) => s.trim()).filter(Boolean) : undefined);
+    const relay = (r) => {
+      for (const k of ['message_policy', 'message']) {
+        if (r[k]) process.stdout.write('\n警告: ' + r[k] + '\n');
+      }
+      if (r.contradicts_policy) process.stdout.write('\n警告: ' + r.contradicts_policy.message + '\n');
+      for (const m of (r.recall && r.recall.messages) || []) process.stdout.write('\nヒント: ' + m + '\n');
+    };
     if (sub === 'new') {
       const body = args.positional.slice(1).join(' ');
-      if (!body) throw new Error('使い方: autopoiesys decision new "<何を決めたか>" --options a,b --chosen a --criteria c1,c2 --expected "<期待結果>" --review-after <日付|イベント> [--tags t] [--scope s] [--task <id>]');
+      if (!body) throw new Error('使い方: autopoiesys decision new "<何を決めたか>" --situation "<何を選ぶ場面か>" --options a,b --chosen a --criteria c1,c2 --expected "<期待結果>" [--tags t] [--scope s] [--task <id>]');
       const r = decision.newDecision(osDir, body, {
+        situation: args.flags.situation ? String(args.flags.situation) : undefined,
         options: list(args.flags.options),
         chosen: args.flags.chosen ? String(args.flags.chosen) : undefined,
         criteria: list(args.flags.criteria),
         expected_outcome: args.flags.expected ? String(args.flags.expected) : undefined,
-        review_after: args.flags['review-after'] ? String(args.flags['review-after']) : undefined,
         tags: list(args.flags.tags),
         scope: list(args.flags.scope),
         source: args.flags.source ? String(args.flags.source) : undefined,
@@ -576,15 +777,21 @@ const COMMANDS = {
         task: args.flags.task ? String(args.flags.task) : undefined,
       });
       out(r, args.flags);
+      relay(r);
       printHints(osDir);
       return 0;
     }
-    if (sub === 'list') {
-      out(decision.listDecisions(osDir, { due: !!args.flags.due }), args.flags);
+    // 決める前に引く。ここが最も安い経路（推論ゼロ）であり、run-taskはこれを先に通る
+    if (sub === 'recall') {
+      const situation = args.positional.slice(1).join(' ') || (args.flags.situation ? String(args.flags.situation) : '');
+      if (!situation) throw new Error('使い方: autopoiesys decision recall "<何を選ぶ場面か>" [--options a,b]');
+      const r = decision.recall(osDir, { situation, options: list(args.flags.options) });
+      out(r, args.flags);
+      for (const m of r.messages) process.stdout.write('\nヒント: ' + m + '\n');
       return 0;
     }
-    if (sub === 'review') {
-      out(decision.reviewSummary(osDir), args.flags);
+    if (sub === 'list') {
+      out(decision.listDecisions(osDir, { unreviewed: !!args.flags.unreviewed }), args.flags);
       return 0;
     }
     if (sub === 'outcome') {
@@ -598,12 +805,50 @@ const COMMANDS = {
         task: args.flags.task ? String(args.flags.task) : undefined,
       });
       out(r, args.flags);
-      // 期待どおりにならなかった決定をログで終わらせない（§26④）
-      if (r.message) process.stdout.write('\n警告: ' + r.message + '\n');
+      relay(r);
       printHints(osDir);
       return 0;
     }
-    throw new Error('使い方: autopoiesys decision new|list|review|outcome');
+    throw new Error('使い方: autopoiesys decision new|recall|list|outcome');
+  },
+
+  // 方針層（直感）。反復して結果が伴った決定の畳み込みで、発火にLLM推論を使わない。
+  policy(args) {
+    const osDir = requireOsDir(args.flags);
+    const sub = args.positional[0] || 'list';
+    if (sub === 'list') {
+      out(policy.listPolicies(osDir, { activeOnly: !!args.flags.active }), args.flags);
+      return 0;
+    }
+    if (sub === 'match') {
+      const situation = args.positional.slice(1).join(' ') || (args.flags.situation ? String(args.flags.situation) : '');
+      if (!situation) throw new Error('使い方: autopoiesys policy match "<何を選ぶ場面か>" [--options a,b]');
+      const r = policy.match(osDir, {
+        situation,
+        options: args.flags.options ? String(args.flags.options).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
+        task: args.flags.task ? String(args.flags.task) : undefined,
+      });
+      out(r, args.flags);
+      if (r.hit) {
+        process.stdout.write(`\nヒント: 確立済みの方針がある → ${r.policy.choose}（推論を経ていない。反する判断をするなら理由を残すこと）\n`);
+      }
+      return 0;
+    }
+    // 通常は decision new / outcome の中で自動的に走る。手動実行は取りこぼしの回収用
+    if (sub === 'compile') {
+      const r = policy.compile(osDir, {
+        fingerprint: args.flags.fingerprint ? String(args.flags.fingerprint) : undefined,
+      });
+      out(r, args.flags);
+      return 0;
+    }
+    if (sub === 'show') {
+      const fp = args.positional[1];
+      if (!fp) throw new Error('使い方: autopoiesys policy show <fingerprint>');
+      out(policy.getPolicy(osDir, fp), args.flags);
+      return 0;
+    }
+    throw new Error('使い方: autopoiesys policy list [--active] | match "<場面>" | compile | show <fingerprint>');
   },
 
   // config.yaml の routing 表から推奨tierを引く。宣言されているだけで誰も読まない表は
@@ -620,6 +865,70 @@ const COMMANDS = {
     return 0;
   },
 
+  // 類型ごとの試行系列。成長しているかの判定材料（系列を並べるだけで断定はしない）
+  growth(args) {
+    const osDir = requireOsDir(args.flags);
+    if (args.flags.json) {
+      out(growth.growthSeries(osDir), args.flags);
+      return 0;
+    }
+    process.stdout.write(growth.growthReport(osDir, args.positional[0]).join('\n') + '\n');
+    return 0;
+  },
+
+  // 蒸留申告の独立監査（S0035）。helped/misledは申告者=実行者のまま台帳に載るので、
+  // 台帳の機械記録だけを別文脈の判定者に渡して、申告と記録の整合を見る経路を作る
+  experience(args) {
+    const osDir = requireOsDir(args.flags);
+    const sub = args.positional[0];
+    const usage = '使い方: autopoiesys experience audit <task> | audit-record <task> --lesson <S00xx> --result supported|contradicted|insufficient [--note "..."] | audits [<task>]';
+    if (sub === 'audit') {
+      const id = args.positional[1];
+      if (!id) throw new Error(usage);
+      const r = claimaudit.buildClaimAudit(osDir, id);
+      out({ task: id, briefing: r.file, claimed: r.claimed.map((c) => `${c.lesson}(${c.role})`), tokens_est: r.tokens_est }, args.flags);
+      if (!args.flags.json) {
+        process.stdout.write('\n会話履歴を持たない別のサブエージェントに、このbriefingファイルだけを渡して判定させること。\n');
+        if (!r.claimed.length) {
+          process.stdout.write('注記: helped/misledの申告が無いため、監査対象がない（先に task consolidate を行う）\n');
+        }
+      }
+      return 0;
+    }
+    if (sub === 'audit-record') {
+      const id = args.positional[1];
+      if (!id) throw new Error(usage);
+      const r = claimaudit.recordClaimAudit(osDir, {
+        task: id,
+        lesson: args.flags.lesson ? String(args.flags.lesson) : undefined,
+        result: args.flags.result ? String(args.flags.result) : undefined,
+        note: args.flags.note ? String(args.flags.note) : undefined,
+        source: args.flags.source ? String(args.flags.source) : undefined,
+      });
+      out(r, args.flags);
+      return 0;
+    }
+    if (sub === 'audits') {
+      const rows = claimaudit.claimAudits(osDir, args.positional[1]);
+      out({ coverage: claimaudit.auditCoverage(osDir), audits: rows }, args.flags);
+      return 0;
+    }
+    throw new Error(usage);
+  },
+
+  // 指示なしで次の仕事を出す。未解決のUnknown・止まったFailure・外れた教訓・
+  // 未蒸留の完了タスク・測れていない基準から決定的に導出する
+  agenda(args) {
+    const osDir = requireOsDir(args.flags);
+    if (args.flags.json) {
+      out(agendaMod.agenda(osDir), args.flags);
+      return 0;
+    }
+    const limit = args.flags.limit ? Number(args.flags.limit) : 10;
+    process.stdout.write(agendaMod.agendaReport(osDir, { limit }).join('\n') + '\n');
+    return 0;
+  },
+
   feedback(args) {
     const osDir = requireOsDir(args.flags);
     const symptom = args.positional.join(' ');
@@ -628,6 +937,10 @@ const COMMANDS = {
       symptom,
       severity: args.flags.severity ? String(args.flags.severity) : 'medium',
       task: args.flags.task ? String(args.flags.task) : undefined,
+      // 検出者の正直な記録。既定はuser_feedback（人間の指摘）。機械の検出器が起票する
+      // 場合は --source goal_audit 等を明示する — これを混ぜると「短絡の検出者は常に人間か」
+      // という問い（C5）の台帳が嘘をつく
+      source: args.flags.source ? String(args.flags.source) : undefined,
     });
     out(r.entry, args.flags);
     if (r.known_matches.length) {
@@ -784,11 +1097,22 @@ World Model:    assert --file s.json / statement add|supersede|show / query [nam
                 ingest repo|rules|memory|knowledge|all [--scope S] [--repo D] [--check]
 知識源と到達性:  sources scan [--emit] / audit reachability
 Intelligence Graph: relate <s> <p> <o> "<説明>" / gap [--goal S00xx] [--assert] [--criteria-only]
-タスクと評価:   task new [--repos <scope>[=<dir>],...] |list|show|note|artifact
+タスクと評価:   task new "<objective>" --class "<類型の1行>" [--repos <scope>[=<dir>],...]
+                         [--origin agenda:<ref>|failure:F00x|lesson:S00xx|unknown:S00xx|user]
+                task brief T（想起の束を取り直す）/ list|show|note|artifact
                 task plan T --file PLAN.md / task plan-verify T（手順の事前固定）
+                task consolidate T --lessons S00x,... [--helped ..] [--misled ..]
+                         [--unapplied .. --unapplied-reason "<理由>"]（蒸留）
                 evaluate --task T / verdict --file v.json / next-action T
-判断:           decision new "..." --options a,b --chosen a --review-after D
-                decision list [--due] / decision review / decision outcome S00xx --result met|unmet|unclear
+成長:           growth [類型名の一部] （類型ごとの試行系列）
+                agenda [--limit N] （指示なしで次の仕事を出す）
+                experience audit T（蒸留申告の独立監査briefingを組む）
+                experience audit-record T --lesson S00xx --result supported|contradicted|insufficient
+                experience audits [T]（監査結果と被覆）
+判断:           decision recall "<場面>"（決める前に引く。推論ゼロ）
+                decision new "..." --situation "<場面>" --options a,b --chosen a
+                decision list [--unreviewed] / decision outcome S00xx --result met|unmet|unclear
+                policy list [--active] | match "<場面>" | compile | show <fp>（直感層）
                 route --purpose <用途> [--signals s1,s2]
 Failureループ:  feedback "..." / failure list|show|transition|lint / regression
 Token Economics: ledger add / research open|close|list / compile --file f.json / metrics
