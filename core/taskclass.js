@@ -176,6 +176,8 @@ function classAttempts(osDir, classFp) {
   for (const id of Object.keys(byId)) {
     const t = byId[id];
     if (!t.class) continue;
+    // 取り下げたタスクは試行ではない。誤登録を系列に数えると自己測定が汚れる（F013）
+    if (t.status === 'withdrawn') continue;
     const fp = t.class_fp || classFingerprint(t.class);
     if (fp !== classFp) continue;
     out.push({ ...t, created_ts: createdTs[id] || t.ts });
@@ -187,10 +189,41 @@ function classAttempts(osDir, classFp) {
   return out;
 }
 
+// 同じ類型の過去タスクが判定させていたのに、今回は宣言されていない評価器（F014）。
+//
+// 完了認定は「宣言されたevaluatorが全てPASS」で定義されるので、**宣言集合そのものが
+// 弱ければ、完全な合格が目的未達と両立する**。「登録後に緩めるのは禁止」は実装されているが、
+// 登録時に弱く選ぶのは自由だった。
+//
+// 実測（F014）: 目的適合を見る唯一の層 objective_alignment が T017 の登録で宣言から落ち、
+// 5タスク連続で外れたまま完了した。評価器の件数は 9→7→8→9→9 と推移しており、
+// **弱体化は新しい検出器の増設に隠れていた** — 量を見る監視では原理的に検出できない。
+// 集合を、同じ類型どうしで比べるしかない。
+//
+// ここが返すのは事実（過去は判定させていた / 今回は宣言が無い）だけで、
+// 宣言を強制はしない。何を判定させるべきかをコアが決めるのは、内容を機械に焼き付ける行為である。
+function evaluatorDrift(osDir, { classFp, evaluators, excludeTaskId } = {}) {
+  if (!classFp) return [];
+  const declared = new Set(evaluators || []);
+  const seen = {};
+  for (const t of classAttempts(osDir, classFp)) {
+    if (excludeTaskId && t.id === excludeTaskId) continue;
+    for (const e of t.evaluators || []) {
+      if (!seen[e]) seen[e] = { evaluator: e, tasks: [] };
+      seen[e].tasks.push(t.id);
+    }
+  }
+  return Object.keys(seen)
+    .filter((e) => !declared.has(e))
+    .sort()
+    .map((e) => seen[e]);
+}
+
 module.exports = {
   classFingerprint,
   suggestClasses,
   recordConsolidation,
   unconsolidatedDone,
   classAttempts,
+  evaluatorDrift,
 };

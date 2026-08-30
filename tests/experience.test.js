@@ -239,3 +239,96 @@ test('digest: 方針・未消化Failure・Unknownが語の重なりで届く', (
   assert.match(text, /retryが暴走/);
   assert.match(text, /timeoutの妥当な閾値が不明/);
 });
+
+test('digest: 同じ類型の仕事で下した過去の決定が、結果つきで黙って届く', () => {
+  const { osDir } = makeOs();
+  const past = makeClassedTask(osDir, 'apiの障害を切り分ける（1回目）', { status: 'done' });
+  const dec = decision.newDecision(osDir, 'retryは指数backoffにする', {
+    situation: 'retryの間隔の決め方を選ぶ',
+    options: ['固定間隔', '指数backoff'],
+    chosen: '指数backoff',
+    task: past.id,
+    source: 'test',
+  });
+
+  const d = experience.digest(osDir, {
+    id: 'T999',
+    objective: 'apiの障害を切り分けてretryの方針を決める',
+    class: CLASS,
+    class_fp: CLASS_FP,
+    repo_dirs: {},
+  });
+  assert.strictEqual(d.decisions.length, 1);
+  assert.strictEqual(d.decisions[0].id, dec.id);
+  assert.strictEqual(d.decisions[0].result, null);
+  const text = d.lines.join('\n');
+  assert.match(text, /### 過去の決定/);
+  assert.match(text, /retryの間隔の決め方を選ぶ/);
+  assert.match(text, /結果が未記録の決定が1件ある/);
+
+  // 結果を記録すると、催促は消えて結果が届く
+  decision.recordOutcome(osDir, dec.id, { result: 'met', source: 'test' });
+  const d2 = experience.digest(osDir, {
+    id: 'T999', objective: 'apiの障害を切り分ける', class: CLASS, class_fp: CLASS_FP, repo_dirs: {},
+  });
+  assert.strictEqual(d2.decisions[0].result, 'met');
+  assert.ok(!d2.lines.join('\n').includes('結果が未記録の決定が'));
+});
+
+test('digest: 類型も語も無関係な決定は届かない', () => {
+  const { osDir } = makeOs();
+  const other = evaluate.newTask(osDir, '無関係な仕事', []);
+  decision.newDecision(osDir, '請求書は月末締めにする', {
+    situation: '請求の締め日を選ぶ',
+    chosen: '月末',
+    task: other.id,
+    source: 'test',
+  });
+  const d = experience.digest(osDir, {
+    id: 'T999', objective: 'apiの障害を切り分ける', class: CLASS, class_fp: CLASS_FP, repo_dirs: {},
+  });
+  assert.deepStrictEqual(d.decisions, []);
+});
+
+test('logDigest: 配信した決定のIDが機械記録に残る（申告に依存せず数えられる）', () => {
+  const { osDir } = makeOs();
+  const past = makeClassedTask(osDir, 'apiの障害を切り分ける（1回目）', { status: 'done' });
+  const dec = decision.newDecision(osDir, 'retryは指数backoffにする', {
+    situation: 'retryの間隔の決め方を選ぶ', chosen: '指数backoff', task: past.id, source: 'test',
+  });
+  const d = experience.digest(osDir, {
+    id: 'T999', objective: 'apiの障害を切り分ける', class: CLASS, class_fp: CLASS_FP, repo_dirs: {},
+  });
+  experience.logDigest(osDir, 'T999', d);
+  const rows = require('node:fs')
+    .readFileSync(require('node:path').join(osDir, 'observations', 'context_log.jsonl'), 'utf8')
+    .trim().split('\n').map((l) => JSON.parse(l));
+  const row = rows.filter((r) => r.kind === 'digest').pop();
+  assert.deepStrictEqual(row.decisions, [dec.id]);
+});
+
+test('digest: 語の枠だけの重なりでは決定を配らない（「〜を選ぶ」で全部が届かない）', () => {
+  const { osDir } = makeOs();
+  const other = evaluate.newTask(osDir, '無関係な仕事', []);
+  decision.newDecision(osDir, 'コーヒーは中煎りにする', {
+    situation: 'コーヒー豆の焙煎度合いを選ぶ', chosen: '中煎り', task: other.id, source: 'test',
+  });
+  // objectiveと situation は「を選/選ぶ」だけが重なる。これを関連と呼ばない
+  const d = experience.digest(osDir, {
+    id: 'T999',
+    objective: 'apiのretryの実装方式を選ぶ',
+    class: CLASS,
+    class_fp: CLASS_FP,
+    repo_dirs: {},
+  });
+  assert.deepStrictEqual(d.decisions, []);
+
+  // 話題が重なる決定は届く
+  decision.newDecision(osDir, 'retryは指数backoffにする', {
+    situation: 'apiのretryの実装方式を選ぶ', chosen: '指数backoff', task: other.id, source: 'test',
+  });
+  const d2 = experience.digest(osDir, {
+    id: 'T999', objective: 'apiのretryの実装方式を選ぶ', class: CLASS, class_fp: CLASS_FP, repo_dirs: {},
+  });
+  assert.strictEqual(d2.decisions.length, 1);
+});

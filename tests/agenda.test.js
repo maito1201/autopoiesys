@@ -237,3 +237,72 @@ test('agendaReport: limitで件数が絞られ、超過分は件数で示され�
   assert.ok(numbered[0].includes('[0.30] proposal proposals/p1.yaml'));
   assert.ok(lines.some((l) => l.trim().startsWith('→')));
 });
+
+test('完了タスクで下した結果未記録の決定が unreviewed_decision として出る', () => {
+  const { osDir } = makeOs();
+  const decision = require('../core/decision');
+  const done = evaluate.newTask(osDir, '終わった仕事', []);
+  evaluate.updateTask(osDir, done.id, { status: 'done' });
+  const open = evaluate.newTask(osDir, '進行中の仕事', []);
+  const d1 = decision.newDecision(osDir, '完了タスクで下した決定', {
+    situation: 'キューの実装方式を選ぶ', chosen: 'redis', task: done.id, source: 'test',
+  });
+  const d2 = decision.newDecision(osDir, '進行中タスクで下した決定', {
+    situation: '監視の粒度を選ぶ', chosen: '1分', task: open.id, source: 'test',
+  });
+  const items = agenda(osDir).items;
+  const hit = items.find((i) => i.ref === d1.id);
+  assert.strictEqual(hit.kind, 'unreviewed_decision');
+  assert.strictEqual(hit.score, 0.45);
+  assert.ok(hit.why.includes('キューの実装方式を選ぶ'));
+  assert.ok(hit.action.includes(`decision outcome ${d1.id}`));
+  // まだ結果が知れない（タスクが終わっていない）決定は出さない
+  assert.strictEqual(items.find((i) => i.ref === d2.id), undefined);
+
+  // 結果を記録すると消える
+  decision.recordOutcome(osDir, d1.id, { result: 'met', source: 'test' });
+  assert.strictEqual(agenda(osDir).items.find((i) => i.ref === d1.id), undefined);
+});
+
+// --- 材料h: 一度も動いていない器官（F011）
+// 「器官が正しく動くか」（テスト）と「成果物が要件を満たすか」（evaluator）の2層はあったが、
+// 「器官が実際に使われたか」を見る層が無く、policy=0件・decision outcome=0件が
+// 3文脈・15タスクのあいだ誰にも名指しされなかった。
+// ループを1周したOSを作る。1周する前は器官が動いていなくて当たり前なので、
+// dead_organ はそもそも出ない（初日のOSに負債を並べても事実を薄めるだけ）
+function makeOperatedOs() {
+  const { osDir } = makeOs();
+  const t = evaluate.newTask(osDir, '1周したタスク', []);
+  evaluate.updateTask(osDir, t.id, { status: 'done', last_action: 'DONE' });
+  return osDir;
+}
+
+test('dead_organ: 仕事を1周する前は何も出さない', () => {
+  const { osDir } = makeOs();
+  assert.deepStrictEqual(agenda(osDir).items.filter((i) => i.kind === 'dead_organ'), []);
+});
+
+test('dead_organ: 記録が0件の器官を名指しし、記録があれば消える', () => {
+  const osDir = makeOperatedOs();
+  const items = () => agenda(osDir).items.filter((i) => i.kind === 'dead_organ').map((i) => i.ref);
+  // 1周した後も記録が0件なら、表に載せた器官が出る
+  assert.ok(items().includes('organ/delivered_context'));
+  assert.ok(items().includes('organ/claim_audit'));
+  // 記録が1件でもあれば消える（強制はしない — 出すのは事実だけ）
+  fs.appendFileSync(
+    path.join(osDir, 'observations', 'context_log.jsonl'),
+    JSON.stringify({ ts: '2026-01-01T00:00:00Z', kind: 'context', task: 'T001', tokens_est: 10 }) + '\n'
+  );
+  assert.ok(!items().includes('organ/delivered_context'));
+  assert.ok(items().includes('organ/claim_audit'), '他の器官は独立に判定される');
+});
+
+// F008の教訓: 抽出不能を「違反ゼロ」と報告する検出器は、壊れたまま緑を出し続ける。
+// 読めない記録を0件（＝器官が動いていない）と読むのは、その逆向きの同じ誤りである。
+test('dead_organ: 記録が読めないときは0件と数えず、警告として出す', () => {
+  const osDir = makeOperatedOs();
+  fs.appendFileSync(path.join(osDir, 'observations', 'context_log.jsonl'), '{壊れた行\n');
+  const r = agenda(osDir);
+  assert.ok(r.warnings.some((w) => w.includes('動いていない器官')), r.warnings.join(' / '));
+  assert.strictEqual(r.items.filter((i) => i.kind === 'dead_organ').length, 0);
+});

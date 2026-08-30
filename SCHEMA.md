@@ -30,7 +30,7 @@ Core はここに定義された形式以外を読み書きしない。`.os/` �
 | evaluators/*.yaml | YAML | Evaluator仕様 |
 | rules/policy-*.yaml | YAML | **方針（直感）** — 反復して結果が伴った決定の畳み込み。発火にLLM推論を使わない |
 | rules/*.yaml | YAML | コンパイル済みルール |
-| tasks/tasks.jsonl | JSONL | タスク台帳 |
+| tasks/tasks.jsonl | JSONL | タスク台帳（`status`: open / done / **withdrawn**。withdrawnは登録時の誤りの取り下げで、`withdrawn_reason` が必須。**成果物もverdictも無いタスクにしか使えない** — 行われた仕事を消す経路にしないため。取り下げたタスクは未評価の警告にも成長の系列にも数えない） |
 | evaluations/log.jsonl | JSONL | verdict台帳 |
 | failures/ledger.jsonl | JSONL | Failure状態機械イベント |
 | golden_tasks/*.yaml | YAML | Golden Task定義 |
@@ -292,7 +292,12 @@ rubric: |
 - deterministic / command は `autopoiesys evaluate` が直接実行し verdict を追記する
 - llm_judge は `autopoiesys evaluate` が `.os/briefings/eval-<task>-<id>.md` を生成する。
   **新規の独立サブエージェント**（生成側の会話履歴を持たない）が briefing のみを読んで
-  判定し、`autopoiesys verdict --file <json>` で記録する
+  判定し、`autopoiesys verdict --file <json>` で記録する。保留の出力には evaluator 定義の
+  `tier` と `config.yaml` routing 表から引いたモデルが付く（判定者を起こすモデルの指定。
+  宣言だけで誰も読まない tier は、全部を同じモデルで回すのと同じである）
+- **前回の判定以降に成果物が1件も変わっていない llm_judge は briefing を生成しない**
+  （`skipped: unchanged`）。同じ状態の再判定に判定1本ぶんの自力探索（実測で1本45k〜128k
+  トークン）を払わないため。`task artifact` で1件でも登録すれば再び生成される
 - **外部記録の制限**: `autopoiesys verdict` が受理するのは method: llm_judge のevaluatorに対する
   verdictのみ。deterministic / command のverdictは `autopoiesys evaluate` の内部実行でしか書けず、
   外部からの provenance 自称（deterministic / replay）は llm に矯正される
@@ -332,11 +337,19 @@ config.yaml の `routing` 表から引く:
 | シグナル | 検出条件 | actionへの反映 |
 |---|---|---|
 | uncertain_verdict | 同一evaluatorのUNCERTAINが2回連続 | DEEP_RESEARCH へ昇格（同じ強さで調べ直しても解けなかった記録） |
-| conflicting_evidence | 同一evaluatorの判定が往復（PASS→FAIL→PASS） | RESOLVE_CONFLICT へ。**DONEも上書きする** — 最新のPASSを採ると覆った理由を調べずに完了になる |
+| conflicting_evidence | **同じ状態への**判定が食い違う（最後の成果物登録以降に記録された llm/human の判定で、同一evaluatorがPASSとFAILの両方を出している） | RESOLVE_CONFLICT へ。**DONEも上書きする** — 最新のPASSを採ると覆った理由を調べずに完了になる |
 | unknown_fingerprint | このタスクの未消化Failureが、対策済みFailureのどれとも症状が一致しない | INVESTIGATE に `escalate: true` |
 
 FIX は昇格で上書きしない（直すべきFAILを覆い隠すと欠陥が視界から消える）。
 全PASSのDONEも、conflicting_evidence 以外では上書きしない。
+
+**食い違いの範囲を「いまの状態」に限るのはF012の是正である。** 判定の並びだけを見ると、
+`run-task` 手順6が指示する FAIL → 修正 → PASS が「往復」と読まれ、正直に是正したタスクほど
+完了に到達できなくなる（実測: T016は全判定の直前に成果物の再登録があり、同一状態での
+食い違いは0件なのに RESOLVE_CONFLICT から出られなかった）。deterministic を数えないのは、
+それが判断ではなく再測定だからである（最新のFAILは決定的FAILとしてFIXが拾う）。
+同じ状態のまま判定を引き直してPASSを得ても、食い違ったFAILは同じ範囲に残るため矛盾は消えない
+（矛盾の「解消」を自己申告で宣言する経路は作っていない）。
 
 `autopoiesys next-action` は DONE のとき `caveats` を返す: goal.yaml の
 success_criteria / constraints のうち、判定器が unbound か実在しない（MISSING）、
@@ -349,9 +362,23 @@ success_criteria / constraints のうち、判定器が unbound か実在しな�
 吸い込むと、目的層の基準を一度実測した瞬間に未達が caveats からも agenda からも消え、
 目的未達のまま完全な DONE に見える（F005 と F010 で2度起きた）。
 
-llm_judgeのbriefingには、そのタスクで記録済みのverdict（evaluator・verdict・provenance・
-evidence抜粋）が「OSが記録した検証実績」として同梱される。0件の場合はその旨が明記され、
-判定者は報告本文の自己申告を証跡として扱わずに済む。
+**briefingは「疑う所」と「信用してよい所」を機械の側で切り分ける。**
+決定的記録（`provenance=deterministic`）はOS自身がコマンドを実行して書いた行で、
+外部から名乗ることはできない。事実（いつ・どのコマンドが・どの終了コードと出力を返したか）は
+信用してよいが、記録が語らないことが3つある: ①その時刻の状態のことしか語らない
+（各行に**鮮度**が付き、その後に成果物が変わっていれば「古い」と明示される）
+②実行された検査の範囲しか語らない ③「だから要件を満たす」は含まれない。
+実行者が書いた散文は従来どおり証拠として扱わない。
+この切り分けは、判定者が決定的記録まで毎回LLMで再導出するのを止めるためにある
+（実測: 判定3本がいずれもテストとregressionを回し直し、3本とも記録と一致し、
+再実行から生まれた指摘は0件だった）。
+
+llm_judgeのbriefingには、そのタスクで記録済みのverdictが「OSが記録した検証実績」として
+同梱される。**evaluatorごとに最新の1件だけ**（verdict・provenance・evidence抜粋≤3行）を載せ、
+過去はverdictの推移1行に畳む — 全履歴を載せるとこの節はevaluateのたびに膨れ続け、
+実測で briefing の66%（3,951トークン）を占めた。Artifact節も同じ理由でパスごとに
+最新の登録1件へ畳み、前回の判定以降に変わったものに印（★）を付ける。
+0件の場合はその旨が明記され、判定者は報告本文の自己申告を証跡として扱わずに済む。
 
 ## Task（tasks/tasks.jsonl の1行）
 
@@ -551,7 +578,10 @@ Skillは全LLM作業（自分自身の推論を含む）をここに自己申告
 
 ```json
 {"ts":"...","kind":"briefing","task":"T001","evaluator":"requirement_satisfied","tokens_est":1656}
-{"ts":"...","kind":"digest","task":"T009","lessons":["S0017","S0019"],"excluded":[],"tokens_est":812}
+{"ts":"...","kind":"digest","task":"T009","lessons":["S0017","S0019"],"excluded":[],"decisions":["S0014"],"tokens_est":812}
+{"ts":"...","kind":"context","task":"T012","purpose":"検出器の複製がないかを調べる","entries":9,"tokens_est":804}
+{"ts":"...","kind":"briefing_skipped","task":"T017","evaluator":"requirement_satisfied","since":"...","tokens_est":0}
+{"ts":"...","kind":"plan_review_briefing","task":"T022","plan":"docs/PLAN-x.md","tokens_est":900}
 {"ts":"...","kind":"claim_audit_briefing","task":"T010","tokens_est":703}
 {"ts":"...","kind":"policy_hit","fingerprint":"36849da9","choose":"5分足","tokens_est":0}
 {"ts":"...","kind":"policy_compiled","fingerprint":"36849da9","choose":"5分足","tokens_est":0}
@@ -560,7 +590,20 @@ Skillは全LLM作業（自分自身の推論を含む）をここに自己申告
 
 `kind: digest` は自動想起の配信記録。`lessons` は届けた教訓のID列で、後から
 consolidatedのhelped/misledと突き合わせれば「届いたが無視された教訓」を
-実行者の自己申告に依存せず数えられる。
+実行者の自己申告に依存せず数えられる。`decisions` は同じ行で届けた過去の決定のIDで、
+「配信されたのに結果が記録されなかった決定」を同じやり方で数えるためにある。
+`kind: context` は実行側へ配ったReasoning Context（`context` コマンド）の記録。
+briefing（判定者側）だけを測ると、トークン経済の実測が評価に偏る。
+`kind: briefing_skipped` は同一状態の再判定を止めた記録（`since` はその判定が見ていた状態の起点）。
+**節約を主張する装置は節約の実績を記録する** — 止めた本数が数えられなければ削減量は
+実測できず、この経路を通った事実も独立監査から見えない（T017の監査で申告2件が
+insufficient になった直接の原因）。
+`kind: plan_review_briefing` は計画の目的適合判定のbriefing（`task plan` が登録と同時に生成）。
+目的適合の判定は完成物に対しても走るが、そこで不適合が出た時点で実装と判定に費やしたものは
+戻らない。受け入れ条件は設計判断が符号化される地点であり、計画登録の瞬間ならまだ方向を変えられる。
+渡すのは goal.yaml・確立済みの方針・計画本文だけで、実行者の説明・完了報告は入らない。
+判定するのは独立サブエージェント（T1）であり、**人間に確認を上げる経路ではない**。
+
 `kind: claim_audit_briefing` は蒸留申告の独立監査briefing（`experience audit`）の生成記録。
 このbriefingには**台帳の機械記録と申告そのものだけ**が入り、完了報告の本文・会話履歴は入らない
 （判定者が申告の説明を読んで申告を判定することを防ぐ）。

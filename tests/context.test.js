@@ -5,7 +5,9 @@ const fs = require('node:fs');
 const { makeOs, write, statement } = require('./helpers');
 const store = require('../core/store');
 const evaluate = require('../core/evaluate');
-const { buildReasoningContext } = require('../core/context');
+const path = require('node:path');
+const context = require('../core/context');
+const { buildReasoningContext } = context;
 const { estimateTokens } = require('../core/util');
 
 // 「関連するもの」と「同じ型のもの全部」を区別できるか。区別できなければ
@@ -175,4 +177,30 @@ test('verdict: insufficient_sample（検出力不足）を受理する', () => {
     }),
     /reasonは/
   );
+});
+
+test('deliverContext: 実行側にも最小Subgraphを配り、消費を機械記録に残す', () => {
+  const { osDir } = makeOs();
+  store.assertStatements(osDir, [
+    { type: 'constraint', body: 'retryは指数backoffで実装すること', tags: ['retry'], status: 'fact', provenance: { source: 'test', method: 'deterministic' } },
+    { type: 'observation', body: '請求書の締め日は月末である', tags: ['billing'], status: 'fact', provenance: { source: 'test', method: 'deterministic' } },
+  ]);
+  const r = context.deliverContext(osDir, { purpose: 'retryの実装方針をサブエージェントに委ねる' });
+  const text = r.lines.join('\n');
+  assert.match(text, /## Reasoning Context/);
+  assert.match(text, /retryは指数backoff/);
+  assert.ok(!text.includes('請求書の締め日'), '無関係な話題は配らない');
+
+  const rows = fs.readFileSync(path.join(osDir, 'observations', 'context_log.jsonl'), 'utf8')
+    .trim().split('\n').map((l) => JSON.parse(l));
+  const row = rows.filter((x) => x.kind === 'context').pop();
+  assert.strictEqual(row.task, 'ad-hoc');
+  assert.strictEqual(row.purpose, 'retryの実装方針をサブエージェントに委ねる');
+  assert.ok(row.tokens_est > 0);
+  assert.strictEqual(row.entries, r.entries.length);
+});
+
+test('deliverContext: taskもpurposeも無ければ配らない（何の文脈かが決まらない）', () => {
+  const { osDir } = makeOs();
+  assert.throws(() => context.deliverContext(osDir, {}), /--task または --purpose/);
 });

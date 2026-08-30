@@ -34,13 +34,27 @@ function policyFile(osDir, fp) {
   return path.join(rulesDir(osDir), `policy-${fp}.yaml`);
 }
 
-// 判断の場の同定。body（言い回し）ではなく situation と options で取る —
+// 判断の場の同定。body（言い回し）ではなく situation で取る —
 // 同じ場が違う言葉で再来したときに一致させるため。
 // 抽象化そのものは書き手が行う（機械には決められない）。一致判定だけを決定的にする。
-function situationFingerprint(situation, options) {
+//
+// **選択肢は同定に含めない。** 第1版は options も鍵に混ぜていたが、選択肢は
+// その場で何を比較したかという審議の中身であって、場の同一性ではない。
+// 実測: 同一文字列の situation でも --options を付けずに引くと別 fingerprint になり、
+// 台帳の決定6件はすべて別の場として記録され、再来が一度も起きなかった。
+function situationFingerprint(situation) {
   const s = String(situation || '').toLowerCase().replace(/\s+/g, '');
-  const o = (options || []).map((x) => String(x).toLowerCase().replace(/\s+/g, '')).sort().join('|');
-  return require('./util').fingerprint(`${s}##${o}`);
+  return require('./util').fingerprint(`${s}##`);
+}
+
+// 決定Statementから「判断の場」の鍵を引く。**読み出しも書き戻しもこの1本を通す。**
+// 記録済みの st.fingerprint は選択肢を鍵に含めた旧方式で作られている場合があり、
+// 現在の規則で引き直さないと同じ決定が2つの場に分かれる。読み出し側だけを直すと、
+// unmet を記録しても方針が撤回されない（自動撤回は裁量ではないと宣言しているのに効かない）。
+function decisionKey(st) {
+  if (!st) return null;
+  if (st.situation) return situationFingerprint(st.situation);
+  return st.fingerprint || null;
 }
 
 function readPolicy(file) {
@@ -122,9 +136,11 @@ function foldByFingerprint(osDir) {
   }
   for (const id of Object.keys(snap.statements).sort()) {
     const st = snap.statements[id];
-    if (st.type !== 'decision' || !st.fingerprint) continue;
-    const bucket = byFp[st.fingerprint] = byFp[st.fingerprint] || {
-      fingerprint: st.fingerprint,
+    if (st.type !== 'decision') continue;
+    const key = decisionKey(st);
+    if (!key) continue;
+    const bucket = byFp[key] = byFp[key] || {
+      fingerprint: key,
       situation: st.situation,
       decisions: [],
     };
@@ -132,6 +148,9 @@ function foldByFingerprint(osDir) {
     bucket.decisions.push({
       id,
       body: st.body,
+      // どのタスクで下した決定かは、結果を催促する契機になる（そのタスクが終われば
+      // 結果は知れるようになっている）。provenanceにしか無いので畳み込みの時点で持ち上げる
+      task: (st.provenance && st.provenance.task) || null,
       chosen: st.chosen,
       options: st.options,
       criteria: st.criteria,
@@ -245,7 +264,7 @@ function compile(osDir, { fingerprint: only } = {}) {
 // 判断の場に一致する active な方針を返す。ここが「直感の発火」であり、
 // LLMを一切呼ばない。発火は台帳に記録する（無料であることを後から検証できるように）。
 function match(osDir, { situation, options, fingerprint: fp, task, log = true } = {}) {
-  const key = fp || situationFingerprint(situation, options);
+  const key = fp || situationFingerprint(situation);
   const p = getPolicy(osDir, key);
   if (!p || p.status !== 'active') return { fingerprint: key, hit: false, policy: null };
   if (log) logPolicyEvent(osDir, { kind: 'policy_hit', fingerprint: key, choose: p.choose, task });
@@ -296,6 +315,7 @@ function policySection(osDir, terms) {
 module.exports = {
   MIN_REPEATS,
   situationFingerprint,
+  decisionKey,
   listPolicies,
   getPolicy,
   foldByFingerprint,

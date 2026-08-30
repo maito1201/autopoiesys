@@ -26,9 +26,10 @@ test('escalation: 同じevaluatorのUNCERTAINが2回続くと DEEP_RESEARCH', ()
   assert.strictEqual(r.escalation.tier, 'T3');
 });
 
-test('escalation: 同じevaluatorの判定が往復したら RESOLVE_CONFLICT', () => {
+test('escalation: 同じ状態への判定が食い違ったら RESOLVE_CONFLICT（成果物を変えずに引き直しても解けない）', () => {
   const { osDir } = makeOs();
-  const t = evaluate.newTask(osDir, '判定の往復', ['a']);
+  const t = evaluate.newTask(osDir, '同一状態の食い違い', ['a']);
+  evaluate.addArtifact(osDir, t.id, { path: 'src/a.js', note: '実装', ts: '2026-01-01T00:00:00Z' });
   verdict(osDir, t.id, 'a', 'PASS');
   verdict(osDir, t.id, 'a', 'FAIL');
   // FAILの間はFIXが優先される（昇格でFAILを覆い隠さない）
@@ -37,7 +38,43 @@ test('escalation: 同じevaluatorの判定が往復したら RESOLVE_CONFLICT', 
   const r = evaluate.nextAction(osDir, t.id);
   assert.strictEqual(r.action, 'RESOLVE_CONFLICT');
   assert.ok(r.escalation.signals.includes('conflicting_evidence'));
-  assert.ok(r.escalation.evidence.some((e) => e.includes('往復')));
+  assert.ok(r.escalation.evidence.some((e) => e.includes('食い違')));
+  // 成果物を変えずにもう一度PASSを積んでも矛盾は消えない
+  verdict(osDir, t.id, 'a', 'PASS');
+  assert.strictEqual(evaluate.nextAction(osDir, t.id).action, 'RESOLVE_CONFLICT');
+});
+
+// F012: run-task 手順6が指示する FAIL → 修正 → PASS を、矛盾と読み違えない。
+// 読み違えると、正直に是正したタスクほど完了に到達できなくなる（実測: T016）。
+// 成果物の再登録より前の判定は「別の状態への判定」であり、いまの状態への矛盾ではない。
+test('escalation: 成果物の再登録より前の判定は食い違いに数えない（是正の系列はDONEに到達する）', () => {
+  const { osDir } = makeOs();
+  const t = evaluate.newTask(osDir, '是正の系列', ['a']);
+  evaluate.addArtifact(osDir, t.id, { path: 'src/a.js', note: '実装', ts: '2026-01-01T00:00:00Z' });
+  verdict(osDir, t.id, 'a', 'PASS');
+  verdict(osDir, t.id, 'a', 'FAIL');
+  assert.strictEqual(evaluate.nextAction(osDir, t.id).action, 'FIX');
+  verdict(osDir, t.id, 'a', 'PASS');
+  // ここまでは同一状態への食い違い
+  assert.strictEqual(evaluate.nextAction(osDir, t.id).action, 'RESOLVE_CONFLICT');
+  // 指摘を直して登録し直す（= 以後の判定の対象は別の状態になる。tsは記録済み判定より後）
+  evaluate.addArtifact(osDir, t.id, { path: 'src/a.js', note: '指摘への修正', ts: '2099-01-01T00:00:00Z' });
+  const r = evaluate.nextAction(osDir, t.id);
+  assert.strictEqual(r.action, 'DONE');
+  assert.ok(!r.escalation || !r.escalation.signals.includes('conflicting_evidence'));
+});
+
+// deterministic は判断ではなく再測定である。入力（台帳）が育って結果が変わるのは矛盾ではない
+// （最新のFAILは決定的FAILとしてFIXが拾うので、取りこぼしにはならない）。
+test('escalation: deterministicの再測定は食い違いに数えない', () => {
+  const { osDir } = makeOs();
+  const t = evaluate.newTask(osDir, '再測定', ['a']);
+  evaluate.addArtifact(osDir, t.id, { path: 'src/a.js', note: '実装', ts: '2026-01-01T00:00:00Z' });
+  verdict(osDir, t.id, 'a', 'FAIL', { provenance: 'deterministic' });
+  verdict(osDir, t.id, 'a', 'PASS', { provenance: 'deterministic' });
+  const r = evaluate.nextAction(osDir, t.id);
+  assert.strictEqual(r.action, 'DONE');
+  assert.ok(!r.escalation || !r.escalation.signals.includes('conflicting_evidence'));
 });
 
 test('escalation: 未知fingerprintのFailureが未消化なら INVESTIGATE に escalate が付く', () => {

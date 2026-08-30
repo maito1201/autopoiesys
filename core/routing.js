@@ -96,4 +96,12 @@ function recommendTier(cfg, { purpose, signals } = {}) {
   };
 }
 
-module.exports = { recommendTier, DEFAULT_TIER, ESCALATED_TIER };
+// tier からモデルを引く。evaluator定義が宣言している tier を、実際のモデル選択に繋ぐ
+// （宣言だけで誰も参照しない tier は、全部を同じモデルで回すことと同じである）。
+function modelForTier(cfg, tier) {
+  const routing = (cfg && cfg.routing) || null;
+  if (!routing || !tier) return null;
+  return modelOf(routing, tier);
+}
+
+module.exports = { recommendTier, modelForTier, DEFAULT_TIER, ESCALATED_TIER };

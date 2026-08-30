@@ -28,11 +28,53 @@ function assertStringArray(v, label) {
   return v;
 }
 
+// 近傍照合の上限と閾値。situationは書き手の自由文なので、同じ場でも語が揺れれば
+// fingerprintは一致しない（実測: 6件の決定はすべて別fingerprintで、再来が一度も起きなかった）。
+// 完全一致の意味は変えずに、語が重なる場を「近い場」として併せて返す。
+const NEAR_LIMIT = 5;
+// 語の重なりで「近い場」と呼ぶ最小の一致数。situationは「〜を選ぶ」「〜の決め方」のような
+// 共通の枠を持つため、1件の重なりで近いと言うと全部が近くなる。実測: 無関係な
+// 「コーヒー豆の焙煎度合いを選ぶ」と「ジョブキューの実装方式を選ぶ」の重なりは
+// 枠だけの2件（を選 / 選ぶ）、実際に近い「ジョブキューの監視方式を選ぶ」は10件。
+// context.js の TERM_MATCH_MIN と同じ理由で同じ値を採る（緩めると近傍が意味を失う）。
+const NEAR_MIN_HITS = 3;
+
+// situationの語が重なる、別fingerprintの決定。関連度（語一致数）→id で決定的に並べる。
+function nearbyDecisions(osDir, situation, excludeFp, byFp) {
+  if (!situation) return [];
+  const { extractTerms } = require('./context'); // 語の切り方だけ借りる（context.jsは編集しない）
+  const terms = [...extractTerms(situation)];
+  if (!terms.length) return [];
+  const rows = [];
+  for (const fpKey of Object.keys(byFp).sort()) {
+    if (fpKey === excludeFp) continue;
+    const b = byFp[fpKey];
+    const s = String(b.situation || '').toLowerCase();
+    const hits = terms.filter((t) => s.includes(t)).length;
+    if (hits < NEAR_MIN_HITS) continue;
+    for (const d of b.decisions) {
+      rows.push({
+        id: d.id,
+        fingerprint: fpKey,
+        situation: b.situation,
+        chosen: d.chosen,
+        latest_result: d.latest_result,
+        hits,
+      });
+    }
+  }
+  rows.sort((a, b) => (b.hits - a.hits) || (a.id < b.id ? -1 : 1));
+  return rows.slice(0, NEAR_LIMIT);
+}
+
 // 同じ判断の場の過去。決定を書く前にも、方針を引く前にも、これを通る。
 function recall(osDir, { situation, options, fingerprint: fp } = {}) {
-  const key = fp || policy.situationFingerprint(situation, options);
-  const bucket = policy.foldByFingerprint(osDir)[key];
+  const key = fp || policy.situationFingerprint(situation);
+  const byFp = policy.foldByFingerprint(osDir);
+  const bucket = byFp[key];
   const prior = bucket ? bucket.decisions : [];
+  // fingerprintだけで引かれた場合でも、台帳側にsituationがあれば近傍照合に使える
+  const near = nearbyDecisions(osDir, situation || (bucket && bucket.situation), key, byFp);
   const unreviewed = prior.filter((d) => !d.outcomes.length);
   const messages = [];
   for (const d of prior) {
@@ -52,10 +94,26 @@ function recall(osDir, { situation, options, fingerprint: fp } = {}) {
       `node cli/index.js decision outcome <id> --result met|unmet|unclear`
     );
   }
+  // 完全一致が無いときこそ近傍が効く。「初めての場だ」と思って考え直す前に、
+  // 語が重なる過去の場を見せる — 場の切り方が細かすぎて再来しないことは、
+  // 経験が無いことを意味しない
+  if (near.length) {
+    messages.push(
+      `完全に同じ場ではないが、語が重なる過去の決定が${near.length}件ある: ` +
+      near.map((n) => `${n.id}「${n.situation}」→ ${n.chosen || '(未記録)'}` +
+        `（結果: ${n.latest_result || '未記録'}）`).join(' / ')
+    );
+    if (!prior.length) {
+      messages.push(
+        '同じ場として扱うなら --situation を近傍に合わせて書くこと（fingerprintが一致して初めて畳み込みの対象になる）'
+      );
+    }
+  }
   const hit = policy.match(osDir, { fingerprint: key, log: false });
   return {
     fingerprint: key,
     prior,
+    near,
     unreviewed: unreviewed.map((d) => d.id),
     policy: hit.policy,
     messages,
@@ -83,8 +141,8 @@ function newDecision(osDir, body, opts = {}) {
   if (options && chosen && !options.includes(chosen)) {
     throw new Error(`chosen "${chosen}" が options に含まれない（options: ${options.join(', ')}）`);
   }
-  const fingerprint = policy.situationFingerprint(situation, options);
-  const before = recall(osDir, { fingerprint });
+  const fingerprint = policy.situationFingerprint(situation);
+  const before = recall(osDir, { fingerprint, situation });
   const st = {
     type: 'decision',
     body,
@@ -201,11 +259,14 @@ function recordOutcome(osDir, id, { result, note, source, method, task } = {}) {
     suggest_feedback: false,
   };
   if (previous) out.previous_outcome = { id: previous.id, result: previous.result };
+  // 場の鍵は畳み込み（読み出し）と同じ1本の規則で引く。記録済みの fingerprint を
+  // 直に使うと、旧方式で記録された決定は unmet を出しても方針が撤回されない
+  const key = policy.decisionKey(decision);
   if (result === 'unmet') {
     // 反証は裁量ではない。unmet が1件出た時点で方針の発火を止める。
     // 「例外はあるが方針は正しい」と言えてしまうと、方針は反証不能な信念になる。
-    if (decision.fingerprint) {
-      const retracted = policy.retract(osDir, decision.fingerprint, {
+    if (key) {
+      const retracted = policy.retract(osDir, key, {
         by: out.id,
         reason: `決定 ${id} の結果が unmet（${note || '理由未記載'}）`,
       });
@@ -220,13 +281,13 @@ function recordOutcome(osDir, id, { result, note, source, method, task } = {}) {
     out.suggest_feedback = true;
     out.message = `期待結果を満たさなかった決定（${id}）。ログで終わらせずFailureとして起票せよ: `
       + `autopoiesys feedback "${decision.body}: 期待した ${decision.expected_outcome || '結果'} にならなかった"`;
-  } else if (result === 'met' && decision.fingerprint) {
+  } else if (result === 'met' && key) {
     // 反証は「方針どおりにやって外れた」だけではない。**方針に反する選択も met になった**なら、
     // その判断の場の切り方が現実と合っていない。どちらの選択も正しいなら、
     // 場を分ける条件が situation に書かれていないということである。
-    const active = policy.getPolicy(osDir, decision.fingerprint);
+    const active = policy.getPolicy(osDir, key);
     if (active && active.status === 'active' && decision.chosen && active.choose !== decision.chosen) {
-      const frozen = policy.retract(osDir, decision.fingerprint, {
+      const frozen = policy.retract(osDir, key, {
         by: out.id,
         reason: `方針は「${active.choose}」だが「${decision.chosen}」も met になった（判断の場の切り方が粗い）`,
         blockRecompile: true,
@@ -238,7 +299,7 @@ function recordOutcome(osDir, id, { result, note, source, method, task } = {}) {
         'situationを切り直してから決定を積み直すこと';
     } else {
       // 結果が伴った時点でコンパイル条件を再評価する（畳み込みの契機は結果の記録側にもある）
-      const c = policy.compile(osDir, { fingerprint: decision.fingerprint });
+      const c = policy.compile(osDir, { fingerprint: key });
       if (c.compiled.length) {
         out.compiled_policy = c.compiled[0];
         out.message_policy =

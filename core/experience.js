@@ -175,6 +175,47 @@ function overlaps(termSet, text) {
   return false;
 }
 
+// 想起で配る決定の上限。多いほど良いものではない（想起そのものが文脈を食う）。
+const DIGEST_DECISION_LIMIT = 6;
+const DECISION_MIN_HITS = 3;
+
+// 語の重なりの件数。overlaps（1件以上で真）より強い条件が要る場所で使う
+function termHits(termSet, text) {
+  const s = String(text || '').toLowerCase();
+  let n = 0;
+  for (const t of termSet) if (s.includes(t)) n++;
+  return n;
+}
+
+// この仕事に効く過去の決定。関連の判定は語の重なりと類型の一致だけ（LLMを呼ばない）。
+function decisionItems(osDir, termSet, pastTaskIds) {
+  const byFp = policy.foldByFingerprint(osDir);
+  const fromClass = new Set(pastTaskIds || []);
+  const rows = [];
+  for (const fp of Object.keys(byFp).sort()) {
+    const b = byFp[fp];
+    // 語の重なりで拾うときは decision.js の近傍照合と同じ最小一致数を要求する。
+    // situationは「〜を選ぶ」のような共通の枠を持つので、1件の重なりでは全部が当たる
+    const overlap = termHits(termSet, b.situation) >= DECISION_MIN_HITS;
+    for (const d of b.decisions) {
+      const sameClass = d.task && fromClass.has(d.task);
+      if (!overlap && !sameClass) continue;
+      rows.push({
+        id: d.id,
+        fingerprint: fp,
+        situation: b.situation,
+        chosen: d.chosen,
+        result: d.latest_result,
+        task: d.task,
+        why: sameClass ? '同じ類型の仕事で下した' : '判断の場の語が重なる',
+      });
+    }
+  }
+  // 結果が未記録のものを先に出す（答え合わせができる状態にある決定を埋もれさせない）
+  rows.sort((a, b) => (a.result ? 1 : 0) - (b.result ? 1 : 0) || (a.id < b.id ? -1 : 1));
+  return rows.slice(0, DIGEST_DECISION_LIMIT);
+}
+
 // タスク開始時に黙って届ける想起の束。集めるものはすべて決定的（索引・照合・集計のみ）。
 // task = {id, objective, class, class_fp, repo_dirs}
 function digest(osDir, task) {
@@ -209,6 +250,13 @@ function digest(osDir, task) {
     .map((p) => ({ fingerprint: p.fingerprint, situation: p.situation, choose: p.choose, because: p.because || [] }))
     .sort((a, b) => (a.fingerprint < b.fingerprint ? -1 : 1));
 
+  // (3') 過去の決定そのもの。方針（3）は「反復して結果が伴った決定」からしか生まれず、
+  //      結果が1件も無い間は永久に空になる。決定を配らなければ、判断の経験は
+  //      実行者に一切届かない — 引きに来させる層（decision recall）は死ぬ、というのが
+  //      教訓層（配信の機械記録あり）との対比で観測された事実である。
+  //      対象は (a) 同じ類型の過去タスクで下した決定、(b) situationがこの仕事の語と重なる決定。
+  const decisions = decisionItems(osDir, termSet, pastTasks.map((t) => t.id));
+
   // (4) 未消化のFailure（implemented/accepted_risk以外）のうち、症状が語と重なるもの
   const failures = Object.values(failure.loadFailures(osDir))
     .filter((f) => !failure.TERMINAL.includes(f.state) && overlaps(termSet, f.symptom))
@@ -226,7 +274,7 @@ function digest(osDir, task) {
 
   const lines = ['## この仕事に効く過去の経験（黙っていても届く想起。取捨は実行者が判断する）', ''];
   const empty = !pastTasks.length && !lf.lessons.length && !lf.excluded.length
-    && !policies.length && !failures.length && !unknowns.length;
+    && !policies.length && !decisions.length && !failures.length && !unknowns.length;
   if (empty) {
     lines.push('この類型は初回。終わったら教訓を残せ');
   } else {
@@ -255,6 +303,24 @@ function digest(osDir, task) {
       for (const p of policies) lines.push(`- ${p.situation} → **${p.choose}**`);
       lines.push('');
     }
+    if (decisions.length) {
+      lines.push('### 過去の決定（同じ場に戻ってきたなら、前回の選択と結果を見てから決めよ）');
+      for (const d of decisions) {
+        lines.push(
+          `- ${d.id}「${d.situation}」→ ${d.chosen || '(選択が未記録)'}` +
+          `（結果: ${d.result || '**未記録**'} | ${d.why}）`
+        );
+      }
+      const pending = decisions.filter((d) => !d.result);
+      if (pending.length) {
+        lines.push('');
+        lines.push(
+          `結果が未記録の決定が${pending.length}件ある。答え合わせができる状態なら今記録すること: ` +
+          `node cli/index.js decision outcome ${pending[0].id} --result met|unmet|unclear`
+        );
+      }
+      lines.push('');
+    }
     if (failures.length) {
       lines.push('### 未消化のFailure（同じ穴に落ちるな）');
       for (const f of failures) lines.push(`- ${f.id} [${f.state}] ${f.symptom}`);
@@ -276,6 +342,7 @@ function digest(osDir, task) {
     lessons: lf.lessons,
     excluded: lf.excluded,
     policies,
+    decisions,
     past_tasks: pastTasks,
     failures,
     unknowns,
@@ -295,6 +362,9 @@ function logDigest(osDir, taskId, d) {
       task: taskId,
       lessons: (d.lessons || []).map((l) => l.id),
       excluded: (d.excluded || []).map((e) => e.id),
+      // 配信した決定のID。後から「届いたのに結果が記録されなかった決定」を
+      // 実行者の記憶に頼らず機械記録だけで数えられる（教訓のhelped/misledと同じ配線）
+      decisions: (d.decisions || []).map((x) => x.id),
       tokens_est: d.tokens_est || 0,
     });
   } catch {

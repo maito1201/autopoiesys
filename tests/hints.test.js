@@ -55,3 +55,30 @@ test('regression実行が履歴に残る', () => {
   assert.strictEqual(log.length, 1);
   assert.strictEqual(log[0].pass, r1.pass);
 });
+
+test('完了したタスクで下した決定の結果が未記録なら警告する（未完了タスクでは黙る）', () => {
+  const { osDir } = makeOs();
+  const evaluate = require('../core/evaluate');
+  const decision = require('../core/decision');
+  const open = evaluate.newTask(osDir, '進行中の仕事', []);
+  const d1 = decision.newDecision(osDir, '進行中に下した決定', {
+    situation: '進行中の場を選ぶ', chosen: 'a', task: open.id, source: 'test',
+  });
+  // まだ終わっていないタスクの決定は催促しない（結果が知れる状態にない）
+  assert.ok(!maintenanceHints(osDir).some((h) => h.includes(d1.id)));
+
+  const done = evaluate.newTask(osDir, '終わった仕事', []);
+  evaluate.updateTask(osDir, done.id, { status: 'done' });
+  const d2 = decision.newDecision(osDir, '終わった仕事で下した決定', {
+    situation: '終わった場を選ぶ', chosen: 'b', task: done.id, source: 'test',
+  });
+  const hints = maintenanceHints(osDir);
+  const hit = hints.filter((h) => h.includes('結果が未記録'));
+  assert.strictEqual(hit.length, 1, hints.join('\n'));
+  assert.ok(hit[0].includes(d2.id));
+  assert.ok(!hit[0].includes(d1.id));
+
+  // 結果を記録すると黙る
+  decision.recordOutcome(osDir, d2.id, { result: 'unmet', source: 'test' });
+  assert.deepStrictEqual(maintenanceHints(osDir).filter((h) => h.includes('結果が未記録')), []);
+});

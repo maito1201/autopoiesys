@@ -4,6 +4,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
+const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
 const { makeOs } = require('./helpers');
 const { appendJsonl } = require('../core/util');
 const evaluate = require('../core/evaluate');
@@ -175,4 +177,104 @@ test('classAttempts: 試行は作成ts順 — 古い試行を後から更新し�
   // 別の類型・未知のfpは混ざらない
   assert.deepStrictEqual(taskclass.classAttempts(osDir, fpB).map((t) => t.id), ['T003']);
   assert.deepStrictEqual(taskclass.classAttempts(osDir, 'deadbeef'), []);
+});
+
+// F014: 判定器の弱体化を、同じ類型どうしの集合比較で捕まえる。
+// 件数では見えない — 実測では objective_alignment が落ちた回で総数は9→7、
+// その後の増設で9に戻り、量的にはむしろ健全に見えた。
+test('evaluatorDrift: 同じ類型の過去タスクが判定させていた評価器の欠落を出す', () => {
+  const { osDir } = makeOs();
+  const t1 = evaluate.newTask(osDir, '1回目', ['tests_pass', 'objective_alignment'], { class: 'デモ類型' });
+  const t2 = evaluate.newTask(osDir, '2回目', ['tests_pass'], { class: 'デモ類型' });
+  const drift = taskclass.evaluatorDrift(osDir, {
+    classFp: t2.class_fp, evaluators: t2.evaluators, excludeTaskId: t2.id,
+  });
+  assert.deepStrictEqual(drift.map((d) => d.evaluator), ['objective_alignment']);
+  assert.deepStrictEqual(drift[0].tasks, [t1.id], 'どのタスクが判定させていたかを示す');
+
+  // 宣言し直せば消える（強制はしないが、事実は事実として消える）
+  const full = taskclass.evaluatorDrift(osDir, {
+    classFp: t2.class_fp, evaluators: ['tests_pass', 'objective_alignment'], excludeTaskId: t2.id,
+  });
+  assert.deepStrictEqual(full, []);
+});
+
+test('evaluatorDrift: 別の類型の宣言は混ぜない（比べるのは同じ類型どうし）', () => {
+  const { osDir } = makeOs();
+  evaluate.newTask(osDir, '別類型', ['tests_pass', 'objective_alignment'], { class: '別の類型' });
+  const t = evaluate.newTask(osDir, 'こちら', ['tests_pass'], { class: 'デモ類型' });
+  assert.deepStrictEqual(
+    taskclass.evaluatorDrift(osDir, { classFp: t.class_fp, evaluators: t.evaluators, excludeTaskId: t.id }),
+    []
+  );
+});
+
+test('next-action: DONEのcaveatsに、宣言から落ちた評価器が載る', () => {
+  const { osDir } = makeOs();
+  evaluate.newTask(osDir, '1回目', ['a', 'objective_alignment'], { class: 'デモ類型' });
+  const t2 = evaluate.newTask(osDir, '2回目', ['a'], { class: 'デモ類型' });
+  evaluate.recordVerdict(osDir, { task: t2.id, evaluator: 'a', verdict: 'PASS', evidence: ['ok'] });
+  const r = evaluate.nextAction(osDir, t2.id);
+  assert.strictEqual(r.action, 'DONE');
+  assert.ok(
+    (r.caveats || []).some((c) => c.includes('objective_alignment') && c.includes('この評価器を除いた範囲')),
+    JSON.stringify(r.caveats)
+  );
+});
+
+// F013: 誤登録の取り下げ。何も行われていないタスクに限る（失敗の隠蔽経路にしない）
+test('withdrawTask: 何も行われていないタスクだけを取り下げられる', () => {
+  const { osDir } = makeOs();
+  const t = evaluate.newTask(osDir, '誤登録', ['a']);
+  const w = evaluate.withdrawTask(osDir, t.id, 'パスが壊れた誤登録');
+  assert.strictEqual(w.status, 'withdrawn');
+  assert.match(w.withdrawn_reason, /誤登録/);
+  assert.throws(() => evaluate.withdrawTask(osDir, t.id, 'もう一度'), /既に取り下げ済み/);
+});
+
+test('withdrawTask: 成果物やverdictがあるタスクは取り下げられない', () => {
+  const { osDir } = makeOs();
+  const t1 = evaluate.newTask(osDir, '実装した', ['a']);
+  evaluate.addArtifact(osDir, t1.id, { path: 'src/a.js', note: '実装' });
+  assert.throws(() => evaluate.withdrawTask(osDir, t1.id, '消したい'), /取り下げられない/);
+
+  const t2 = evaluate.newTask(osDir, '判定された', ['a']);
+  evaluate.recordVerdict(osDir, { task: t2.id, evaluator: 'a', verdict: 'FAIL', evidence: ['欠陥'] });
+  assert.throws(() => evaluate.withdrawTask(osDir, t2.id, '消したい'), /取り下げられない/);
+
+  assert.throws(() => evaluate.withdrawTask(osDir, evaluate.newTask(osDir, 'x', ['a']).id, ''), /--reason/);
+});
+
+test('withdrawTask: 取り下げたタスクは類型の試行に数えない', () => {
+  const { osDir } = makeOs();
+  const t1 = evaluate.newTask(osDir, '1回目', ['a'], { class: 'デモ類型' });
+  const t2 = evaluate.newTask(osDir, '誤登録', ['a'], { class: 'デモ類型' });
+  assert.strictEqual(taskclass.classAttempts(osDir, t1.class_fp).length, 2);
+  evaluate.withdrawTask(osDir, t2.id, '誤登録だった');
+  assert.deepStrictEqual(taskclass.classAttempts(osDir, t1.class_fp).map((x) => x.id), [t1.id]);
+});
+
+// 系列の実装は2つある（core/growth.js と scripts/check-intelligence-trend.js）。
+// sc-005に束縛されているのは後者で、そちらだけ除外が抜けていた（T023の判定が検出）。
+// 片方だけ直すと、目的層の基準は誤登録を数え続ける。
+test('withdrawn: 系列を数える実装が2つとも取り下げを除外する', () => {
+  const { osDir } = makeOs();
+  const t1 = evaluate.newTask(osDir, '1回目', ['a'], { class: 'デモ類型' });
+  const t2 = evaluate.newTask(osDir, '誤登録', ['a'], { class: 'デモ類型' });
+  evaluate.withdrawTask(osDir, t2.id, '誤登録だった');
+  // core/growth.js 側
+  const series = require('../core/growth').growthSeries(osDir);
+  const attempts = (series[t1.class_fp] || {}).attempts || [];
+  assert.deepStrictEqual(attempts.map((a) => a.task.id), [t1.id]);
+  // scripts/check-intelligence-trend.js 側は**挙動**で見る（ソース文字列一致では、
+  // 除外が書かれていても効いていない状態を通してしまう）。
+  // 取り下げた側にだけFAILを積み、取り下げが効いていれば系列に現れない
+  for (let i = 0; i < 3; i++) {
+    evaluate.recordVerdict(osDir, { task: t2.id, evaluator: 'a', verdict: 'FAIL', evidence: ['x'] });
+  }
+  const run = (dir) => spawnSync(process.execPath,
+    [path.join(__dirname, '..', 'scripts', 'check-intelligence-trend.js'), dir],
+    { encoding: 'utf8' });
+  const out = run(osDir).stdout;
+  assert.ok(!out.includes(t2.id), `取り下げたタスクが系列に現れている: ${out}`);
 });

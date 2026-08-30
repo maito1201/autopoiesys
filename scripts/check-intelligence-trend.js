@@ -65,6 +65,9 @@ for (const id of Object.keys(merged).sort((a, b) => {
 })) {
   const t = merged[id];
   if (!t.class_fp) continue;
+  // 取り下げたタスク（誤登録）は試行ではない（F013）。core/growth.js と同じ規律を
+  // ここにも置く — 系列の実装が2つあり、sc-005 に束縛されているのはこちらである
+  if (t.status === 'withdrawn') continue;
   (byClass[t.class_fp] = byClass[t.class_fp] || { class: t.class, attempts: [] }).attempts.push({
     id, session: sessionOf(String(createdTs[id] || '')), bad: failsByTask[id] || 0,
   });

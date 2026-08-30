@@ -175,7 +175,7 @@ function openTasksWithoutVerdicts(osDir) {
     return rows;
   }
   for (const t of Object.values(tasks)) {
-    if (t.status && t.status !== 'open') continue;
+    if (t.status && t.status !== 'open') continue; // done も withdrawn も対象外
     const declared = t.evaluators || [];
     if (!declared.length) continue;
     const latest = latestVerdicts(osDir, t.id);
@@ -198,7 +198,7 @@ function openTasksJudgingProseOnly(osDir) {
     return rows;
   }
   for (const t of Object.values(tasks)) {
-    if (t.status && t.status !== 'open') continue;
+    if (t.status && t.status !== 'open') continue; // done も withdrawn も対象外
     if (!(t.artifacts || []).length) continue;      // 未登録は「評価が未実行」側で拾う
     const judges = (t.evaluators || []).filter((id) => {
       try {
@@ -264,6 +264,34 @@ function maintenanceHints(osDir, { now } = {}) {
     }
   } catch {
     // taskclass未整備でも主機能を止めない
+  }
+
+  // 完了したタスクで下した決定のうち、結果が未記録のもの。催促の契機は日付ではなく
+  // 「そのタスクが終わったこと」— 期待どおりになったかを知れるようになった瞬間である。
+  // ここが繋がっていないと、決定は書かれるだけで照合されず、方針（推論なしの直感）は
+  // 永久にコンパイルされない（実測: この配線を入れる直前、決定6件すべてが結果未記録で方針0件だった）
+  try {
+    const tasksById = require('./evaluate').loadTasks(osDir);
+    const byFp = require('./policy').foldByFingerprint(osDir);
+    const pending = [];
+    for (const fp of Object.keys(byFp).sort()) {
+      for (const d of byFp[fp].decisions) {
+        if (!d.task || d.outcomes.length) continue;
+        const t = tasksById[d.task];
+        if (!t || t.status !== 'done') continue;
+        pending.push(d.id);
+      }
+    }
+    if (pending.length) {
+      pending.sort();
+      hints.push(
+        `警告: 完了したタスクで下した決定 ${pending.length} 件の結果が未記録（${pending.join(', ')}）。` +
+        '結果を照合しない決定は経験にならず、方針（推論なしで発火する直感）へ畳み込まれない。' +
+        `node cli/index.js decision outcome ${pending[0]} --result met|unmet|unclear で答え合わせを`
+      );
+    }
+  } catch {
+    // 決定層が未整備でも主機能を止めない
   }
 
   for (const t of openTasksWithoutVerdicts(osDir)) {

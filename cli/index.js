@@ -25,6 +25,7 @@ const experience = require('../core/experience');
 const growth = require('../core/growth');
 const agendaMod = require('../core/agenda');
 const claimaudit = require('../core/claimaudit');
+const contextMod = require('../core/context');
 
 function parseArgs(argv) {
   const positional = [];
@@ -493,6 +494,32 @@ const COMMANDS = {
     return 0;
   },
 
+  // 実行側にも最小Subgraphを配る（CONCEPTv2 §8「Agentにはこのsubgraphだけを渡す」）。
+  // これまで Reasoning Context は llm_judge の briefing にしか流れておらず、
+  // 仕事をするAgent（特に会話履歴を持たないサブエージェント）には、
+  // 「会話の切り貼り」以外に文脈を渡す手段が無かった。
+  context(args) {
+    const osDir = requireOsDir(args.flags);
+    const purpose = args.flags.purpose ? String(args.flags.purpose) : args.positional.join(' ');
+    const taskId = args.flags.task ? String(args.flags.task) : null;
+    if (!purpose && !taskId) {
+      throw new Error('使い方: autopoiesys context [--task T] [--purpose "<これから何をするか>"] [--queries q1,q2] [--max-tokens N] [--param k=v]');
+    }
+    const r = contextMod.deliverContext(osDir, {
+      task: taskId ? evaluate.getTask(osDir, taskId) : null,
+      purpose,
+      queries: args.flags.queries ? String(args.flags.queries).split(',').map((v) => v.trim()) : [],
+      maxTokens: args.flags['max-tokens'] ? Number(args.flags['max-tokens']) : undefined,
+      params: args.flags.params || {},
+    });
+    if (args.flags.json) {
+      out(r, args.flags);
+      return 0;
+    }
+    process.stdout.write(r.lines.join('\n') + '\n');
+    return 0;
+  },
+
   task(args) {
     const osDir = requireOsDir(args.flags);
     const sub = args.positional[0];
@@ -536,6 +563,28 @@ const COMMANDS = {
       } else if (t.origin_verified) {
         // 解決できた由来だけが自発的推進（sc-007）の証拠になる。解決の事実をその場で見せる
         process.stdout.write(`\nOS由来として解決した: ${t.origin_verified.ref}（${t.origin_verified.via}）\n`);
+      }
+      // 判定器の弱体化を、選び終えたその場で押し出す（F014）。
+      // 完了認定は「宣言されたevaluatorが全てPASS」なので、宣言集合が弱ければ
+      // 完全な合格が目的未達と両立する。実測: 目的適合を見る唯一の層が5タスク連続で
+      // 落ちたまま通り、評価器の件数は増えていたので量的な監視では見えなかった。
+      // 出すのは事実だけで、宣言は強制しない
+      try {
+        const drift = taskclass.evaluatorDrift(osDir, {
+          classFp: t.class_fp,
+          evaluators: t.evaluators,
+          excludeTaskId: t.id,
+        });
+        if (drift.length) {
+          process.stdout.write(
+            '\n警告: 同じ類型の過去タスクが判定させていた評価器が、今回は宣言されていない:\n'
+            + drift.map((d) => `  - ${d.evaluator}（過去: ${d.tasks.join(', ')}）`).join('\n')
+            + '\n意図して外したなら task note に理由を残すこと。'
+            + '判定させない選択は、完了認定の意味を静かに変える\n'
+          );
+        }
+      } catch (e) {
+        process.stdout.write(`\n（判定器の推移の照合に失敗: ${e.message}）\n`);
       }
       // 想起は押し付ける。自分が何を思い出せていないかは自分では分からないので、
       // 「必要なら聞く」に任せると一番必要なときに一番落ちる
@@ -617,6 +666,15 @@ const COMMANDS = {
       printHints(osDir);
       return 0;
     }
+    // 誤登録の取り下げ（F013）。何かが行われたタスクは取り下げられない
+    if (sub === 'withdraw') {
+      const id = args.positional[1];
+      const reason = args.flags.reason ? String(args.flags.reason) : args.positional.slice(2).join(' ');
+      if (!id || !reason) throw new Error('使い方: autopoiesys task withdraw <id> --reason "<なぜ誤登録だったか>"');
+      const t = evaluate.withdrawTask(osDir, id, reason);
+      out({ task: t.id, status: t.status, withdrawn_reason: t.withdrawn_reason }, args.flags);
+      return 0;
+    }
     if (sub === 'note') {
       const id = args.positional[1];
       const note = args.positional.slice(2).join(' ');
@@ -640,13 +698,11 @@ const COMMANDS = {
       const t = evaluate.getTask(osDir, id);
       // tsを残す。これが無いと「PLANを事前に固定したのか、成果を見た後に書いたのか」を
       // 台帳から判定できず、plan-verifyは常に「判定不能」しか返せない
-      const artifacts = [...(t.artifacts || []), {
+      const updated = evaluate.addArtifact(osDir, id, {
         path: String(args.flags.path),
         note: args.flags.note ? String(args.flags.note) : '',
-        ts: util.nowIso(),
-      }];
-      evaluate.updateTask(osDir, id, { artifacts });
-      out({ task: id, artifacts: artifacts.length, added: String(args.flags.path) }, args.flags);
+      });
+      out({ task: id, artifacts: (updated.artifacts || []).length, added: String(args.flags.path) }, args.flags);
       // 成果物登録は完了報告の直前に通る地点。ここで未評価を告げないと、
       // 評価器を呼ばないまま完成報告する経路が開いたままになる
       printHints(osDir);
@@ -657,6 +713,41 @@ const COMMANDS = {
       if (!id || !args.flags.file) throw new Error('使い方: autopoiesys task plan <id> --file <PLANのパス>');
       const r = plan.registerPlan(osDir, id, String(args.flags.file));
       out(r, args.flags);
+      // 受け入れ条件は設計判断が符号化される地点であり、ここはまだ何も作っていないので
+      // 方向を変えられる。完成物への目的適合判定は、すでに費やしたものを取り戻さない
+      // （実測: 領域固有の器官を作った回は、実装と2回の判定で30万トークンを使ってから破棄になった）。
+      // 判定するのは独立サブエージェントであって人間ではない
+      try {
+        const t = evaluate.getTask(osDir, id);
+        const abs = plan.resolvePlanPath(osDir, t, String(args.flags.file));
+        const pr = require('../core/planreview').preparePlanReview(osDir, t, abs, r.path);
+        let model = null;
+        try {
+          model = routing.modelForTier(schema.loadConfig(osDir), 'T1');
+        } catch {
+          model = null;
+        }
+        process.stdout.write(
+          `\n計画の目的適合を、作り始める前に判定させること（briefing: ${pr.file}${model ? ` / tier T1 → モデル: ${model}` : ''}）。\n`
+          + '会話履歴を持たない独立サブエージェントに渡し、`node cli/index.js verdict --file <json>` で記録させる。\n'
+        );
+      } catch (e) {
+        // 失敗を画面に出すだけでは、後から「この計画は判定にかけられたのか」を機械記録から
+        // 引けない。押し出す機構が黙って落ちたことは、台帳に残らなければ起きなかったのと同じになる
+        try {
+          util.appendJsonl(path.join(osDir, 'observations', 'context_log.jsonl'), {
+            ts: util.nowIso(),
+            kind: 'plan_review_failed',
+            task: id,
+            plan: r.path,
+            error: String(e.message),
+            tokens_est: 0,
+          });
+        } catch {
+          // 記録にも失敗したなら画面出力だけが残る（主機能は止めない）
+        }
+        process.stdout.write(`\n（計画レビューのbriefingを作れなかった: ${e.message}。この失敗は台帳に記録した）\n`);
+      }
       return 0;
     }
     if (sub === 'plan-verify') {
@@ -672,7 +763,7 @@ const COMMANDS = {
       out({ task: id, evaluators }, args.flags);
       return 0;
     }
-    throw new Error('使い方: autopoiesys task new|brief|list|show|note|artifact|plan|plan-verify|consolidate|set-evaluators');
+    throw new Error('使い方: autopoiesys task new|brief|list|show|note|artifact|withdraw|plan|plan-verify|consolidate|set-evaluators');
   },
 
   evaluate(args) {
@@ -692,8 +783,14 @@ const COMMANDS = {
       process.stdout.write(
         '\nllm_judge評価が保留中。独立サブエージェント（生成側の会話履歴を持たないこと）に\n' +
         '各briefingを読ませ、`node cli/index.js verdict --file <json>` で記録させること:\n' +
-        pending.map((p) => `  ${p.briefing}`).join('\n') + '\n'
+        pending.map((p) => `  ${p.briefing}`
+          + (p.model ? `（tier ${p.tier} → モデル: ${p.model}）` : ''))
+          .join('\n') + '\n'
       );
+    }
+    // 同じ状態を二度判定させない。判定1本は数万トークンかかるので、握りつぶさず理由を見せる
+    for (const x of r.results.filter((y) => y.skipped === 'unchanged')) {
+      process.stdout.write(`\nヒント: ${x.evaluator} は再判定しなかった。${x.why}\n`);
     }
     printHints(osDir);
     return 0;
@@ -784,7 +881,7 @@ const COMMANDS = {
     // 決める前に引く。ここが最も安い経路（推論ゼロ）であり、run-taskはこれを先に通る
     if (sub === 'recall') {
       const situation = args.positional.slice(1).join(' ') || (args.flags.situation ? String(args.flags.situation) : '');
-      if (!situation) throw new Error('使い方: autopoiesys decision recall "<何を選ぶ場面か>" [--options a,b]');
+      if (!situation) throw new Error('使い方: autopoiesys decision recall "<何を選ぶ場面か>"（選択肢は場の同定に使わない）');
       const r = decision.recall(osDir, { situation, options: list(args.flags.options) });
       out(r, args.flags);
       for (const m of r.messages) process.stdout.write('\nヒント: ' + m + '\n');
@@ -822,10 +919,10 @@ const COMMANDS = {
     }
     if (sub === 'match') {
       const situation = args.positional.slice(1).join(' ') || (args.flags.situation ? String(args.flags.situation) : '');
-      if (!situation) throw new Error('使い方: autopoiesys policy match "<何を選ぶ場面か>" [--options a,b]');
+      if (!situation) throw new Error('使い方: autopoiesys policy match "<何を選ぶ場面か>"（選択肢は場の同定に使わない）');
+      // --options は受け取るが場の同定には使わない（互換のために落とさないだけ）
       const r = policy.match(osDir, {
         situation,
-        options: args.flags.options ? String(args.flags.options).split(',').map((s) => s.trim()).filter(Boolean) : undefined,
         task: args.flags.task ? String(args.flags.task) : undefined,
       });
       out(r, args.flags);
@@ -848,7 +945,7 @@ const COMMANDS = {
       out(policy.getPolicy(osDir, fp), args.flags);
       return 0;
     }
-    throw new Error('使い方: autopoiesys policy list [--active] | match "<場面>" | compile | show <fingerprint>');
+    throw new Error('使い方: autopoiesys policy list [--active] | match "<場面>"（選択肢は場の同定に使わない） | compile | show <fingerprint>');
   },
 
   // config.yaml の routing 表から推奨tierを引く。宣言されているだけで誰も読まない表は
@@ -1020,13 +1117,14 @@ const COMMANDS = {
 
   ledger(args) {
     const osDir = requireOsDir(args.flags);
-    if (args.positional[0] !== 'add') throw new Error('使い方: autopoiesys ledger add --purpose p --tier T2 [--tokens-in N --tokens-out N [--measured]] [--task T001] [--model m] [--session R001] [--assets a,b]\n  トークンは任意。入れる場合は既定で見積り扱い（estimated: true）になり、API実測値のときだけ --measured を付ける');
+    if (args.positional[0] !== 'add') throw new Error('使い方: autopoiesys ledger add --purpose p --tier T2 [--tokens-in N --tokens-out N | --tokens-total N] [--measured] [--task T001] [--model m] [--session R001] [--assets a,b]\n  トークンは任意。入れる場合は既定で見積り扱い（estimated: true）になり、API実測値のときだけ --measured を付ける\n  内訳が分からない実測（サブエージェントの消費合計など）は --tokens-total を使う（0を埋めない）');
     const r = knowledge.ledgerAdd(osDir, {
       purpose: args.flags.purpose ? String(args.flags.purpose) : undefined,
       tier: String(args.flags.tier || ''),
       model: args.flags.model ? String(args.flags.model) : '',
       tokens_in: args.flags['tokens-in'],
       tokens_out: args.flags['tokens-out'],
+      tokens_total: args.flags['tokens-total'],
       measured: args.flags.measured === true,
       task: args.flags.task ? String(args.flags.task) : undefined,
       session: args.flags.session ? String(args.flags.session) : undefined,
@@ -1100,6 +1198,7 @@ Intelligence Graph: relate <s> <p> <o> "<説明>" / gap [--goal S00xx] [--assert
 タスクと評価:   task new "<objective>" --class "<類型の1行>" [--repos <scope>[=<dir>],...]
                          [--origin agenda:<ref>|failure:F00x|lesson:S00xx|unknown:S00xx|user]
                 task brief T（想起の束を取り直す）/ list|show|note|artifact
+                task withdraw T --reason "<誤登録の理由>"（何もしていないタスクに限る）
                 task plan T --file PLAN.md / task plan-verify T（手順の事前固定）
                 task consolidate T --lessons S00x,... [--helped ..] [--misled ..]
                          [--unapplied .. --unapplied-reason "<理由>"]（蒸留）
@@ -1115,6 +1214,8 @@ Intelligence Graph: relate <s> <p> <o> "<説明>" / gap [--goal S00xx] [--assert
                 policy list [--active] | match "<場面>" | compile | show <fp>（直感層）
                 route --purpose <用途> [--signals s1,s2]
 Failureループ:  feedback "..." / failure list|show|transition|lint / regression
+文脈の配布:     context [--task T] [--purpose "<今から何をするか>"] [--queries q1,q2]
+                         [--max-tokens N]（実行側・サブエージェントへ渡す最小Subgraph）
 Token Economics: ledger add / research open|close|list / compile --file f.json / metrics
 
 全コマンド共通: [--os-dir D] [--json]

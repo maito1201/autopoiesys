@@ -12,6 +12,13 @@
 // 使い方: node scripts/check-policy-invariant.js [.osのパス]
 const fs = require('node:fs');
 const path = require('node:path');
+// 判断の場の鍵は、実装と同じ1本の規則（policy.decisionKey）で引く。
+// 検出器の中で鍵の計算を書き写すと、実装側の規則が変わったときに検出器だけが
+// 旧規則で照合し続け、安全網が黙って無効になる（実際にそうなった: 鍵を
+// situation から引き直すように直した際、この検出器だけが生の fingerprint を見ていた）。
+// 検査対象はあくまで**状態の不変条件**であって鍵の計算そのものではないため、
+// 鍵の規則は実装に委ね、その規則自体は tests/decision.test.js の変異注入で守る。
+const { decisionKey } = require('../core/policy');
 
 const osDir = path.resolve(process.argv[2] || '.os');
 const violations = [];
@@ -59,13 +66,17 @@ for (const e of current) {
   if (e.type !== 'outcome') continue;
   const target = e.decision || (e.links || []).find((l) => l.role === 'derived_from')?.to;
   const d = target && decisions[target];
-  if (!d || !d.fingerprint) continue;
-  if (e.result === 'unmet') unmetFps.add(d.fingerprint);
+  if (!d) continue;
+  const key = decisionKey(d);
+  if (!key) continue;
+  if (e.result === 'unmet') unmetFps.add(key);
   if (e.result === 'met') {
-    const p = policyByFp[d.fingerprint];
-    // 方針の choose は検査に要らないので読まない。読むのは「方針が存在する場で
-    // 別の選択が met になったか」だけ — その判定には decision 側の chosen で足りる
-    if (p && p.status === 'active' && d.chosen) contradictedFps.add(`${d.fingerprint}::${d.chosen}`);
+    const p = policyByFp[key];
+    // 方針に反する選択が met になった場は凍結されていなければならない（DESIGN 3層目）。
+    // 「どちらの選択も met になる」なら、場を分ける条件が situation に書かれていない
+    if (p && p.status === 'active' && d.chosen && p.choose && p.choose !== d.chosen) {
+      contradictedFps.add(key);
+    }
   }
 }
 
@@ -79,6 +90,12 @@ for (const p of policies) {
     violations.push(
       `${path.basename(p.file)}: この判断の場には unmet の結果が記録されているのに status: active のまま。` +
       '反証された方針が発火し続けている（撤回は裁量ではなく自動でなければならない）'
+    );
+  }
+  if (contradictedFps.has(p.fingerprint)) {
+    violations.push(
+      `${path.basename(p.file)}: この判断の場では方針と異なる選択も met になっているのに status: active のまま。` +
+      'どちらの選択も met になる場は凍結されなければならない（場を分ける条件が situation に無い）'
     );
   }
 }

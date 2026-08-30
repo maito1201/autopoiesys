@@ -260,4 +260,44 @@ function buildReasoningContext(osDir, { task, evaluator, maxTokens, snapshot: pr
   };
 }
 
-module.exports = { buildReasoningContext, extractTerms, HOP_ROLES, DEFAULT_MAX_TOKENS };
+// 実行側へ文脈を配る（CONCEPTv2 §8「Agentにはこのsubgraphだけを渡す」）。
+// これまで Reasoning Context は llm_judge の briefing にしか流れておらず、
+// 仕事をするAgent（特に会話履歴を持たないサブエージェント）に渡す手段が無かった。
+// 判定者向けと同じ選抜装置を使い、渡す相手が実行側になっただけである。
+// task は台帳のタスク（省略可）、purpose は「そのエージェントに今からさせること」。
+function deliverContext(osDir, { task, purpose, queries, maxTokens, params } = {}) {
+  if (!task && !purpose) throw new Error('--task または --purpose のどちらかが必要');
+  // purposeはタスクの中の一場面を絞る語であり、objectiveと併せて関連度の種にする
+  const seed = {
+    id: (task && task.id) || 'ad-hoc',
+    objective: [task && task.objective, purpose].filter(Boolean).join(' '),
+    class_fp: task && task.class_fp,
+    artifacts: (task && task.artifacts) || [],
+    repo_dirs: (task && task.repo_dirs) || {},
+  };
+  const list = (queries || []).filter(Boolean);
+  const r = buildReasoningContext(osDir, {
+    task: seed,
+    evaluator: list.length ? { id: 'context', context_queries: list } : undefined,
+    maxTokens,
+    queryParams: params || {},
+  });
+  // 判定者側（briefing）だけを測ると、トークン経済の実測が評価に偏る。
+  // 実行側に配った文脈も同じ台帳に載せる
+  try {
+    const { appendJsonl, nowIso } = require('./util');
+    appendJsonl(require('node:path').join(osDir, 'observations', 'context_log.jsonl'), {
+      ts: nowIso(),
+      kind: 'context',
+      task: seed.id,
+      purpose: purpose || null,
+      entries: r.entries.length,
+      tokens_est: r.tokens_est,
+    });
+  } catch {
+    // 記録の失敗で文脈の配布そのものを止めない
+  }
+  return r;
+}
+
+module.exports = { buildReasoningContext, deliverContext, extractTerms, HOP_ROLES, DEFAULT_MAX_TOKENS };

@@ -31,7 +31,7 @@ function researchFile(osDir) {
 // トークン値は実行者の手入力であり、測定値と見積りが混ざると optimization の
 // コスト判断を誤る。値を入れるなら測定/見積りの別を必ず持たせ、
 // 分からないなら入れない（測れないものを台帳に入れない）。
-function ledgerAdd(osDir, { purpose, tier, model, tokens_in, tokens_out, task, session, asset_refs, measured = false }) {
+function ledgerAdd(osDir, { purpose, tier, model, tokens_in, tokens_out, tokens_total, task, session, asset_refs, measured = false }) {
   if (!purpose) throw new Error('purpose必須');
   if (!TIERS.includes(tier)) throw new Error(`tierは ${TIERS.join('|')}`);
   const entry = {
@@ -41,6 +41,10 @@ function ledgerAdd(osDir, { purpose, tier, model, tokens_in, tokens_out, task, s
     model: model || '',
   };
   const hasTokens = tokens_in !== undefined || tokens_out !== undefined;
+  const hasTotal = tokens_total !== undefined;
+  if (hasTokens && hasTotal) {
+    throw new Error('tokens_total と tokens_in/out は同時に指定しない（同じ消費を二重に数える）');
+  }
   if (hasTokens) {
     const inN = Number(tokens_in);
     const outN = Number(tokens_out);
@@ -50,6 +54,17 @@ function ledgerAdd(osDir, { purpose, tier, model, tokens_in, tokens_out, task, s
     entry.tokens_in = inN;
     entry.tokens_out = outN;
     // 既定は見積り。APIの実測値を持っている場合だけ measured を立てる
+    entry.estimated = !measured;
+  } else if (hasTotal) {
+    // 内訳の無い実測（サブエージェントの消費合計など）。これを受け取れないと、
+    // 合計しか手に入らない測定を記録するために 0 を捏造することになる
+    // （実際に tokens_in: 0 と書いた実例がある。S0151/S0153）。
+    // 「入出力の内訳が不明」と「入力が0」は別のことなので、別のフィールドで表す。
+    const totalN = Number(tokens_total);
+    if (!Number.isFinite(totalN) || totalN < 0) {
+      throw new Error('tokens_total は0以上の数値');
+    }
+    entry.tokens_total = totalN;
     entry.estimated = !measured;
   }
   if (task) entry.task = task;

@@ -97,6 +97,9 @@ function growthSeries(osDir) {
     // 類型を持たないタスクは系列に含めない。class_fpをここで補完計算しないのは、
     // 指紋の計算規則をtaskclass側に一元化するため（二重実装は静かにずれる）。
     if (!t.class_fp) continue;
+    // 取り下げたタスク（誤登録）は試行ではない。数えると成長の系列が汚れる（F013。
+    // 実測: 壊れた登録が「試行10回目」として並び、差し戻し1件として集計されていた）
+    if (t.status === 'withdrawn') continue;
     const bucket = byClass[t.class_fp] = byClass[t.class_fp] || { class: t.class, attempts: [] };
     const s = vstats[id] || { fails: 0, uncertains: 0, verdicts: 0 };
     bucket.attempts.push({

@@ -6,6 +6,7 @@
 // すべて既存台帳の照合と算術で行う（同じOS状態からは常に同じ並びが出る）。
 const fs = require('node:fs');
 const path = require('node:path');
+const { readJsonl } = require('./util');
 
 // ---- 優先度の重み。この重みは測定に基づかない暫定値（設計時に決めた順序づけの近似）。
 // growthの試行系列とlesson feedbackの実測が貯まったら、そこから見直す。
@@ -25,6 +26,12 @@ const WEIGHTS = {
   unmet_criterion: 0.8,
   // .os/proposals/ に残っている未消化の提案
   proposal: 0.3,
+  // 一度も動いていない器官。事実の開示であって仕事の指示ではないので、
+  // 未消化の提案と同じ最下層に置く（見え続けるが、他を押しのけない）
+  dead_organ: 0.3,
+  // 完了したタスクで下したのに結果が未記録の決定。放置すると決定層は帳簿のまま
+  // 経験にならないが、単発の答え合わせは未消化のFailureより軽い
+  unreviewed_decision: 0.45,
 };
 
 // 既に着手されている項目の減衰率。消さずに下げる — 着手したまま放置されている仕事は
@@ -164,6 +171,30 @@ function unmeasuredCriterionItems(osDir) {
   return items;
 }
 
+// ---- 材料e': 完了したタスクで下したのに結果が未記録の決定。
+// 「決めた通りになったか」を照合するループ（CONCEPT §8）は、この照合が行われて初めて閉じる。
+function unreviewedDecisionItems(osDir) {
+  const tasksById = require('./evaluate').loadTasks(osDir);
+  const byFp = require('./policy').foldByFingerprint(osDir);
+  const items = [];
+  for (const fp of Object.keys(byFp).sort()) {
+    const b = byFp[fp];
+    for (const d of b.decisions) {
+      if (!d.task || d.outcomes.length) continue;
+      const t = tasksById[d.task];
+      if (!t || t.status !== 'done') continue;
+      items.push({
+        kind: 'unreviewed_decision',
+        ref: d.id,
+        why: `「${b.situation}」で${d.chosen ? `「${d.chosen}」を選んだ` : '決めた'}が、期待どおりになったか未記録（${d.task} は完了済み）`,
+        score: WEIGHTS.unreviewed_decision,
+        action: `node cli/index.js decision outcome ${d.id} --result met|unmet|unclear --note "<何が起きたか>"`,
+      });
+    }
+  }
+  return items;
+}
+
 // ---- 材料f: .os/proposals/ に残っているファイル（未消化の提案）
 // 提案ファイルは適用後も残る（適用の記録であり、消すと履歴が消える）。
 // 「ファイルが在る」を「未消化」と読むと、適用済みの提案が永久に次の仕事として
@@ -219,6 +250,153 @@ function proposalItems(osDir) {
       action: `/upgrade-os を実行して proposals/${ent.name} の適用可否を判断する`,
     });
   }
+  return items;
+}
+
+// ---- 材料h: 一度も動いていない器官（F011）。
+//
+// F011の why_undetected は「器官が正しく動くか」（テスト・golden）と「成果物が要件を
+// 満たすか」（evaluator）の2層はあるのに、**「器官が実際に使われたか」を見る層が無い**
+// というものだった。decision/policy は単体テスト全件PASSで、テストの中では閉ループが
+// 成立していた。実運用の記録（policy.active=0 / hits=0 / outcome 0件）は metrics に
+// 出ていたが、ゼロを問題として名指しする経路が無く、3文脈・15タスクのあいだ誰も読まなかった。
+//
+// **強制はしない。** 出すのは「この器官は一度も動いていない」という事実だけで、
+// 「だから使え」とも「だから消せ」とも言わない。使われない器官は資産ではなく負債だが、
+// 負債の返し方は「使う」と「捨てる」の両方があり、どちらを選ぶかはコアが決めることではない
+// （S0018: 検出器は内容を強制せず開示だけを強制する）。
+//
+// 表に載せるのは **設計上、通常運用で必ず記録が生じるはずの器官だけ**である。
+// 正当に0件でありうるもの（research 等）は載せない — 誤検出する検出器は無いのと同じか、
+// それ以下である。器官を実装した変更が、自分でこの表に1行足すこと。
+const ORGANS = [
+  {
+    id: 'policy',
+    what: '方針層（反復した決定を畳み込み、LLM推論なしで選択を返す）',
+    where: 'rules/policy-*.yaml',
+    zero_means: '決定が一度も方針に畳み込まれていない',
+    next: 'node cli/index.js decision outcome <S00xx> --result met|unmet で結果を記録し、再来を待つ',
+  },
+  {
+    id: 'policy_hit',
+    what: '方針の発火（想起をLLMなしで返した回数）',
+    where: 'observations/context_log.jsonl の kind: policy_hit',
+    zero_means: '方針が存在しても、実行者が判断の前に引いていない',
+    next: 'run-task 手順2の decision recall / policy match を判断のたびに通す',
+  },
+  {
+    id: 'decision_outcome',
+    what: '決定の結果照合（決めた通りになったかを見るループ）',
+    where: 'world_model の type: decision に記録された outcome',
+    zero_means: '決定が帳簿のままで、経験になっていない（F011の症状そのもの）',
+    next: 'node cli/index.js decision outcome <S00xx> --result met|unmet|unclear',
+  },
+  {
+    id: 'measured_tokens',
+    what: 'Token Ledgerの実測（見積りでない消費の記録）',
+    where: 'observations/costs.jsonl の estimated: false',
+    zero_means: 'コスト判断の材料が全件見積りで、削減の主張を実測で検証できない',
+    next: 'ledger add に --tokens-in/--tokens-out --measured を付けられる経路を作る',
+  },
+  {
+    id: 'delivered_context',
+    what: '実行側へのReasoning Context配布（context コマンド）',
+    where: 'observations/context_log.jsonl の kind: context',
+    zero_means: '最小Subgraphが判定者専用のままで、実行側・サブエージェントに配られていない',
+    next: 'node cli/index.js context --task <id> --purpose "<委ねる仕事>"',
+  },
+  {
+    id: 'claim_audit',
+    what: '蒸留申告の独立監査（helped/misled を台帳と突き合わせる）',
+    where: 'observations/claim_audit.jsonl',
+    zero_means: '申告が申告者自身のまま確定していて、経験再利用の主張に裏づけが無い',
+    next: 'node cli/index.js experience audit <task> を回し、別文脈の判定者に記録させる',
+  },
+];
+
+// 器官の記録を数える。**読めなかったことを0件と混同しない**（F008の教訓:
+// 抽出不能を「違反ゼロ」と報告する検出器は、壊れたまま緑を出し続ける）。
+// 数えられなかった器官は例外にして、agendaのwarningsに出す。
+function countOrganRecords(osDir, organ) {
+  const countJsonl = (file, pred) => {
+    const p = path.join(osDir, file);
+    if (!fs.existsSync(p)) return 0; // 未作成は「まだ動いていない」であって異常ではない
+    const text = fs.readFileSync(p, 'utf8');
+    let n = 0;
+    for (const line of text.split('\n')) {
+      const s = line.trim();
+      if (!s) continue;
+      let row;
+      try {
+        row = JSON.parse(s);
+      } catch {
+        throw new Error(`${file} に壊れた行がある（読めない記録を0件と数えない）`);
+      }
+      if (!pred || pred(row)) n++;
+    }
+    return n;
+  };
+  if (organ.id === 'policy') {
+    const dir = path.join(osDir, 'rules');
+    if (!fs.existsSync(dir)) return 0;
+    return fs.readdirSync(dir).filter((f) => /^policy-.*\.ya?ml$/.test(f)).length;
+  }
+  if (organ.id === 'policy_hit') {
+    return countJsonl(path.join('observations', 'context_log.jsonl'), (r) => r.kind === 'policy_hit');
+  }
+  if (organ.id === 'decision_outcome') {
+    // 結果は decision を書き換えず、type: outcome の別Statementとして追記される
+    // （SCHEMA.md: レビューは元のdecisionをsupersedeせず、outcomeを追記して derived_from で張る）。
+    // decision側の outcome フィールドを数えると、記録が積み上がっても永久に0件になる
+    const snap = require('./store').getSnapshot(osDir);
+    return (snap.indexes.by_type.outcome || [])
+      .filter((id) => snap.statements[id] && snap.statements[id].result).length;
+  }
+  if (organ.id === 'measured_tokens') {
+    // 台帳の実体は costs.jsonl である（ledger.jsonl は存在しない）。
+    // 存在しないファイルを見ていたため、この器官は何を記録しても永久に0件だった
+    return countJsonl(path.join('observations', 'costs.jsonl'), (r) => r.estimated === false);
+  }
+  if (organ.id === 'delivered_context') {
+    return countJsonl(path.join('observations', 'context_log.jsonl'), (r) => r.kind === 'context');
+  }
+  if (organ.id === 'claim_audit') {
+    return countJsonl(path.join('observations', 'claim_audit.jsonl'));
+  }
+  throw new Error(`器官の数え方が未定義: ${organ.id}`);
+}
+
+function deadOrganItems(osDir) {
+  // まだ一度も仕事を完了していないOSでは、器官が動いていないのは当たり前である。
+  // 表に載せた器官はどれも run-task のループを1周すれば記録が生じるものなので、
+  // 「1周した後も0件」を条件にする（初日のOSに6件の負債を並べても、事実を薄めるだけ）
+  const tasks = {};
+  for (const r of readJsonl(path.join(osDir, 'tasks', 'tasks.jsonl'))) {
+    if (r && r.id) tasks[r.id] = { ...(tasks[r.id] || {}), ...r };
+  }
+  if (!Object.values(tasks).some((t) => t.status === 'done' || t.last_action === 'DONE')) return [];
+  const items = [];
+  const failed = [];
+  for (const organ of ORGANS) {
+    let n;
+    try {
+      n = countOrganRecords(osDir, organ);
+    } catch (e) {
+      failed.push(`${organ.id}: ${e.message}`);
+      continue;
+    }
+    if (n > 0) continue;
+    items.push({
+      kind: 'dead_organ',
+      ref: `organ/${organ.id}`,
+      why: `${organ.what}の記録が0件（${organ.where}）— ${organ.zero_means}。`
+        + '使うか捨てるかはこちらでは決めない',
+      score: WEIGHTS.dead_organ,
+      action: organ.next,
+    });
+  }
+  // 数えられなかった器官は黙って落とさない。抽出不能を「動いている」とも「0件」とも読まない
+  if (failed.length) throw new Error(`器官の記録を数えられない: ${failed.join(' / ')}`);
   return items;
 }
 
@@ -311,7 +489,9 @@ function agenda(osDir, { resolveOrigins = true } = {}) {
     ...collect(warnings, '反証された教訓', () => contestedLessonItems(osDir)),
     ...collect(warnings, '未蒸留の完了タスク', () => unconsolidatedTaskItems(osDir)),
     ...collect(warnings, '未測定の基準', () => unmeasuredCriterionItems(osDir)),
+    ...collect(warnings, '結果未記録の決定', () => unreviewedDecisionItems(osDir)),
     ...collect(warnings, '未消化の提案', () => proposalItems(osDir)),
+    ...collect(warnings, '動いていない器官', () => deadOrganItems(osDir)),
   ];
   // 着手済みの項目は消さずに降格する。resolveOrigins: false は resolveOrigin からの
   // 再入時（agendaを引くためにagendaを引く）に無限再帰を避けるための入口。
