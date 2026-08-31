@@ -1168,15 +1168,25 @@ const COMMANDS = {
       fallbackScope: args.flags['fallback-scope'] ? String(args.flags['fallback-scope']) : undefined,
       apply: !!args.flags.apply,
     });
+    // format_versionが同じでも「Coreが後から同梱したファイルが届いていない」ことはある。
+    // 移行の要否をここで聞かれる以上、その不足もここで名指しする
+    const missingBundled = scaffold.missingBundledQueries(osDir);
     out({
       current_format: cfg.format_version,
       core_format: schema.FORMAT_VERSION,
       scopes,
       scope_backfill: report,
+      missing_bundled_queries: missingBundled,
       message: report.applied
         ? 'scopeを後埋めした。check で整合を確認せよ'
         : 'dry-run（--apply で適用）。scopeの写し先が意図どおりか by_scope を確認せよ',
     }, args.flags);
+    if (missingBundled.length) {
+      process.stdout.write(
+        `\n警告: Coreが同梱するQueryが${missingBundled.length}件この.osに無い（${missingBundled.join(', ')}）。\n`
+        + 'autopoiesys init --force で不足分だけ補える（config・goal・語彙などの既存ファイルは上書きしない）。\n'
+      );
+    }
     return 0;
   },
 

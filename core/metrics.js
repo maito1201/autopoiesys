@@ -22,11 +22,18 @@ function computeMetrics(osDir) {
   let measuredTokens = 0;
   let entriesWithoutTokens = 0;
   for (const c of costs) {
-    if (c.tokens_in === undefined && c.tokens_out === undefined) {
+    // tokens_total は「内訳が分からない実測」（サブエージェントの消費合計など）の受け皿で、
+    // ledger add の usage が案内している経路である。ここで見ないと、**実測を入れられる
+    // 唯一の経路が集計から落ち**、measured は永久に0のままになる（実際にそうなっていた）。
+    // 内訳と合計が両方ある行は合計を採る — 「内訳が分からないときに使う」という宣言なので
+    // 両立は矛盾であり、どちらか一方に倒すことを明示する。
+    if (c.tokens_in === undefined && c.tokens_out === undefined && c.tokens_total === undefined) {
       entriesWithoutTokens++;
       continue;
     }
-    const t = (c.tokens_in || 0) + (c.tokens_out || 0);
+    const t = c.tokens_total !== undefined
+      ? (c.tokens_total || 0)
+      : (c.tokens_in || 0) + (c.tokens_out || 0);
     totalTokens += t;
     // estimated未設定の旧エントリは出所が判別できない。見積り側に寄せて
     // 「実測である」と誤読させない

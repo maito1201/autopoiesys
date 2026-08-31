@@ -265,6 +265,19 @@ node cli/index.js audit reachability    # 取り込んだ知識がQueryから引
 滞留が締め切りに近づいたとき、**評価器を一度も実行しないまま開いているタスクがあるとき**、
 OSが「ヒント:」「警告:」として自分から知らせてくる。
 
+**Core更新後は「同梱ファイルが届いているか」も見る。** `init` は既存ファイルを作らない方式
+（`writeIfAbsent`）なので、Coreが後から増やした同梱Queryは、既にある `.os` には自動では
+入らない。`check` が警告し、`migrate` が `missing_bundled_queries` として名指しする:
+
+```bash
+node cli/index.js migrate                # 移行要否 + 届いていない同梱Query
+node cli/index.js init --force           # 不足分だけ補う（config・goal・語彙は上書きしない）
+```
+
+これを見落とすと、`audit reachability` が「Queryから引けない事実がある」と落ちる形で
+**ずっと後になってから**露見する（実例: `get_past_decisions` の欠落に、決定の結果を
+1件記録するまで誰も気づけなかった）。
+
 Claude Code用のスキル（`.claude/skills/`）は `skills/` の生成コピーなので、Core更新後は
 同期する。CIに `--check` を置けばズレが検出できる:
 

@@ -37,7 +37,7 @@ Core はここに定義された形式以外を読み書きしない。`.os/` �
 | briefings/*.md | MD | T3投入用の厳選コンテキスト（git監査対象）。llm_judge用のbriefingには**artifactに実装が含まれるか**が明記され、含まれない場合は判定者に「実装に依存するrubric項目はUNCERTAIN」と指示される |
 | proposals/ | MD/diff | OSS Core等への変更提案の下書き |
 | plugins/*.yaml | YAML | 逃げ道プラグイン宣言（**未実装** — Core側の実行・台帳記録の受け皿は将来版。現状はproposals/への還流を使う） |
-| observations/costs.jsonl | JSONL | Token Ledger（**自己申告**） |
+| observations/costs.jsonl | JSONL | Token Ledger（**自己申告**。`tokens_total` は内訳が分からない実測の受け皿） |
 | observations/context_log.jsonl | JSONL | briefing生成時のコンテキスト消費（**機械実測**。自己申告と違い、削減の主張をここだけで検証できる） |
 | observations/claim_audit.jsonl | JSONL | 蒸留申告の独立監査結果（`experience audit-record` の行 = `{ts, task, lesson, result, source, note?}`）。helped/misled/unappliedは**実行者の申告**であり、この台帳を通るまで検証済みではない。contradicted は申告の極性辺を撤回するが、**教訓に新しい反証は張らない**（罰するのは申告であって教訓ではない — 虚偽申告のせいで正しい教訓が引退した実例 S0061 から） |
 | observations/query_log.jsonl | JSONL | Query実行記録（切詰め・頻度） |
@@ -567,6 +567,10 @@ goal.yamlのsuccess_criteria/constraints（evaluator接地）も同じ語彙で�
 
 Skillは全LLM作業（自分自身の推論を含む）をここに自己申告する。
 `tokens_in` / `tokens_out` は任意で、入れるなら両方を指定する（片方だけの記録は集計を歪める）。
+内訳が分からない実測（**判定を委ねたサブエージェントの消費合計など**）は `tokens_total` に入れる
+（`ledger add --tokens-total N`）。0で内訳を埋めると実測が偽の内訳を持つことになるため、
+合計だけを残す経路を別に用意してある。`tokens_total` と内訳が両方ある行は合計を採る —
+「内訳が分からないときに使う」という宣言なので両立は矛盾であり、どちらに倒すかを固定する。
 値は実行者の手入力なので既定で `estimated: true`（見積り）が付き、API実測値を持つ場合だけ
 `ledger add --measured` で `estimated: false` になる。分からないなら入れない — 見積りを
 実測として台帳に残すと optimization のコスト判断を誤る。

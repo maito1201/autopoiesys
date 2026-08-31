@@ -38,8 +38,15 @@ try {
 // 取り込み済みのref。ingest-* は provenance.ref に**絶対パス**を焼くため、
 // 台帳を別のチェックアウトへ複製すると照合が丸ごと外れる（fixtureで実際に起きた）。
 // 照合はパス末尾（ディレクトリ名 + ファイル名）で行い、絶対パスの一致には依存しない。
+//
+// `#` 以降のフラグメントも落とす。ingest rules は規約ドキュメントを**見出し単位**で
+// Statement化するため ref が `<絶対パス>#<見出し>` になる（core/ingest.js の ingestRules）。
+// 落とさないと宣言側 `repo/claude.md` と取込側 `repo/claude.md#見出し` が構造上どれ一つ
+// 一致せず、**rule_docs は常に「未取込」と誤検出される**。ingest memory の ref は
+// フラグメントを持たないため memory_dir だけ合格し、この欠陥は長く隠れていた。
 function refKey(p) {
-  const parts = String(p).replace(/\\/g, '/').toLowerCase().split('/').filter(Boolean);
+  const parts = String(p).replace(/\\/g, '/').split('#')[0].toLowerCase()
+    .split('/').filter(Boolean);
   return parts.slice(-2).join('/');
 }
 

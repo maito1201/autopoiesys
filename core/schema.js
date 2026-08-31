@@ -265,6 +265,20 @@ function checkAll(osDir, { now } = {}) {
       '— 呼び出し側がnext_offsetで追わないと最後尾が落ちる'
     );
   }
+  // Coreが後から同梱したQueryが、この .os に届いているか。
+  // init は writeIfAbsent 方式なので、**既にある .os には新しい同梱ファイルが永久に入らない**。
+  // 実例: get_past_decisions の欠落に、decision を1件記録して wm_reachability が
+  // 落ちるまで誰も気づけなかった。到達性のFAILは、たいてい「Queryが足りない」ではなく
+  // 「Coreの更新が届いていない」を意味する。
+  // requireを関数内に置いているのは循環参照の回避（scaffoldはFORMAT_VERSIONのために
+  // このモジュールをトップレベルでrequireしている）。
+  const missingBundled = require('./scaffold').missingBundledQueries(osDir);
+  if (missingBundled.length) {
+    report.warnings.push(
+      `Coreが同梱するQueryが${missingBundled.length}件この.osに無い（${missingBundled.join(', ')}）` +
+      '— Core更新が既存の.osに届いていない。autopoiesys init --force で不足分だけ補える（既存ファイルは上書きしない）'
+    );
+  }
   const wm = lintWorldModel(osDir, { strict: !!cfg.strict_vocabulary });
   report.errors.push(...wm.errors);
   report.warnings.push(...wm.warnings);
