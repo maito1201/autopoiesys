@@ -30,8 +30,9 @@ Core はここに定義された形式以外を読み書きしない。`.os/` �
 | evaluators/*.yaml | YAML | Evaluator仕様 |
 | rules/policy-*.yaml | YAML | **方針（直感）** — 反復して結果が伴った決定の畳み込み。発火にLLM推論を使わない |
 | rules/*.yaml | YAML | コンパイル済みルール |
-| tasks/tasks.jsonl | JSONL | タスク台帳（`status`: open / done / **withdrawn**。withdrawnは登録時の誤りの取り下げで、`withdrawn_reason` が必須。**成果物もverdictも無いタスクにしか使えない** — 行われた仕事を消す経路にしないため。取り下げたタスクは未評価の警告にも成長の系列にも数えない） |
+| tasks/tasks.jsonl | JSONL | タスク台帳（`status`: open / **delivered**（納品済み・検収待ち） / **settled**（検収済み） / **withdrawn**。doneは旧形式の互換読みのみ。withdrawnは登録時の誤りの取り下げで、`withdrawn_reason` が必須。**成果物もverdictも無いタスクにしか使えない** — 行われた仕事を消す経路にしないため。取り下げたタスクは未評価の警告にも成長の系列にも数えない） |
 | evaluations/log.jsonl | JSONL | verdict台帳 |
+| claims/ledger.jsonl | JSONL | **宣言台帳（納品と検収の分離）** — claim行（宣言+反証手続き）と settlement行（現実による検収）。brokeは較正上sticky |
 | failures/ledger.jsonl | JSONL | Failure状態機械イベント |
 | golden_tasks/*.yaml | YAML | Golden Task定義 |
 | briefings/*.md | MD | T3投入用の厳選コンテキスト（git監査対象）。llm_judge用のbriefingには**artifactに実装が含まれるか**が明記され、含まれない場合は判定者に「実装に依存するrubric項目はUNCERTAIN」と指示される |
@@ -337,11 +338,11 @@ config.yaml の `routing` 表から引く:
 | シグナル | 検出条件 | actionへの反映 |
 |---|---|---|
 | uncertain_verdict | 同一evaluatorのUNCERTAINが2回連続 | DEEP_RESEARCH へ昇格（同じ強さで調べ直しても解けなかった記録） |
-| conflicting_evidence | **同じ状態への**判定が食い違う（最後の成果物登録以降に記録された llm/human の判定で、同一evaluatorがPASSとFAILの両方を出している） | RESOLVE_CONFLICT へ。**DONEも上書きする** — 最新のPASSを採ると覆った理由を調べずに完了になる |
+| conflicting_evidence | **同じ状態への**判定が食い違う（最後の成果物登録以降に記録された llm/human の判定で、同一evaluatorがPASSとFAILの両方を出している） | RESOLVE_CONFLICT へ。**DELIVER等の緑の終端も上書きする** — 最新のPASSを採ると覆った理由を調べずに納品になる |
 | unknown_fingerprint | このタスクの未消化Failureが、対策済みFailureのどれとも症状が一致しない | INVESTIGATE に `escalate: true` |
 
 FIX は昇格で上書きしない（直すべきFAILを覆い隠すと欠陥が視界から消える）。
-全PASSのDONEも、conflicting_evidence 以外では上書きしない。
+全PASSの緑の終端（DELIVER / AWAIT_SETTLEMENT / SETTLED）も、conflicting_evidence 以外では上書きしない。
 
 **食い違いの範囲を「いまの状態」に限るのはF012の是正である。** 判定の並びだけを見ると、
 `run-task` 手順6が指示する FAIL → 修正 → PASS が「往復」と読まれ、正直に是正したタスクほど
@@ -351,16 +352,16 @@ FIX は昇格で上書きしない（直すべきFAILを覆い隠すと欠陥が
 同じ状態のまま判定を引き直してPASSを得ても、食い違ったFAILは同じ範囲に残るため矛盾は消えない
 （矛盾の「解消」を自己申告で宣言する経路は作っていない）。
 
-`autopoiesys next-action` は DONE のとき `caveats` を返す: goal.yaml の
+`autopoiesys next-action` は緑の終端（DELIVER等）のとき `caveats` を返す: goal.yaml の
 success_criteria / constraints のうち、判定器が unbound か実在しない（MISSING）、
 一度も実行されていない（UNVERIFIED）、**または実行した結果の最新verdictがFAIL（UNMET）**な
-ものの一覧。DONEは「このタスクのevaluatorが全てPASS」であって「Goalが達成されている」では
+ものの一覧。DELIVERは「このタスクのevaluatorが全てPASS」であって「Goalが達成されている」では
 ないため、完了報告に「この目的は現在測定不能」または「測定した結果、不合格」を明示させる
 ための出力である。
 
 **「測れていない」と「測って不合格」は同じ語で呼ばない。** UNMET を AVAILABLE に
 吸い込むと、目的層の基準を一度実測した瞬間に未達が caveats からも agenda からも消え、
-目的未達のまま完全な DONE に見える（F005 と F010 で2度起きた）。
+目的未達のまま完全な納品に見える（F005 と F010 で2度起きた）。
 
 **briefingは「疑う所」と「信用してよい所」を機械の側で切り分ける。**
 決定的記録（`provenance=deterministic`）はOS自身がコマンドを実行して書いた行で、
@@ -458,6 +459,36 @@ unapplied の申告も独立監査（`experience audit`）の対象に載る（m
 **PLANが変更されたこと自体は違反ではない**（計画の更新は正当でありうる）。
 コアが提供するのは「変更された事実」と「その前後関係が記録から判定できるか」だけで、
 妥当性は判定しない。llm_judgeのbriefingにはこの照合結果が節として載る。
+
+## Claim（claims/ledger.jsonl の1行）
+
+納品物は「宣言 + 反証手続き」の形でしか受理されない。検収（settlement）は現実 —
+Coreが実行するコマンド・時間・ユーザー — が行い、剥がれた宣言（broke）はタスクをopenへ戻し、
+較正台帳に恒久に残る（後からheldに直しても乖離の事実は消えない）。
+
+```json
+{ "kind": "claim", "id": "C0001", "ts": "...", "task": "T001",
+  "body": "テストが全件通る",
+  "falsifier": { "type": "command", "argv": ["node", "--test"], "scope": "api" } }
+{ "kind": "settlement", "id": "C0001-s1", "ts": "...", "claim": "C0001",
+  "result": "held", "evidence": ["exit=0"], "provenance": "deterministic", "source": "deliver" }
+```
+
+| falsifier.type | 意味 | 検収者 |
+|---|---|---|
+| command | argvを実行してexpect_exit（既定0）と照合 | Core（deterministic） |
+| file_matches / file_not_matches | path×patternの照合 | Core（deterministic） |
+| deferred | `how`（何がいつ剥がすか）を宣言。`due` で期限 | 現実・時間（`claim settle --result` で記録） |
+| user | ユーザーの検収だけが採点できる | ユーザー |
+| （falsifierなし） | `unfalsifiable_reason` の開示が必須。納品記録に残る | 検収されない（較正に入らない） |
+
+- 外部（CLI経由の `--result` 持参）は `provenance: deterministic` を名乗れない — 元帳は現実だけから書かれる
+- **較正**: 類型ごとに `broke_ever / settled` を集計（`autopoiesys trust`）。この乖離率が
+  llm_judgeの監査率を決める: 検収実績が `trust.min_history` 未満・直近5件にbroke・前回verdictが非PASS
+  のときは必ず監査、それ以外は `p = max(floor, 2 × 乖離率)` の決定的抽選
+  （(task, evaluator, 成果物時刻) のハッシュ — 引き直しで検査を回避できない）。
+  免除（sampled_out）はverdictを書かず、context_logに `audit_sampled_out` として記録され、
+  next-action では `waived` として扱われる
 
 ## Failure（failures/ledger.jsonl の1行 = 状態遷移イベント）
 

@@ -209,13 +209,13 @@ test('evaluatorDrift: 別の類型の宣言は混ぜない（比べるのは同�
   );
 });
 
-test('next-action: DONEのcaveatsに、宣言から落ちた評価器が載る', () => {
+test('next-action: DELIVERのcaveatsに、宣言から落ちた評価器が載る', () => {
   const { osDir } = makeOs();
   evaluate.newTask(osDir, '1回目', ['a', 'objective_alignment'], { class: 'デモ類型' });
   const t2 = evaluate.newTask(osDir, '2回目', ['a'], { class: 'デモ類型' });
   evaluate.recordVerdict(osDir, { task: t2.id, evaluator: 'a', verdict: 'PASS', evidence: ['ok'] });
   const r = evaluate.nextAction(osDir, t2.id);
-  assert.strictEqual(r.action, 'DONE');
+  assert.strictEqual(r.action, 'DELIVER');
   assert.ok(
     (r.caveats || []).some((c) => c.includes('objective_alignment') && c.includes('この評価器を除いた範囲')),
     JSON.stringify(r.caveats)

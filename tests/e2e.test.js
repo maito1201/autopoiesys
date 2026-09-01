@@ -105,7 +105,7 @@ test('閉ループ1周（Phase 1〜3の垂直スライス）', () => {
     '  goalのsuccess_criteriaを満たしているか判定せよ。',
   ].join('\n'));
 
-  const task = evaluate.newTask(osDir, 'retryの冪等性を実装する', ['no_unsafe_retry', 'requirement_satisfied']);
+  const task = evaluate.newTask(osDir, 'retryの冪等性を実装する', ['no_unsafe_retry', 'requirement_satisfied'], { work_dir: root });
   evaluate.updateTask(osDir, task.id, { artifacts: [{ path: 'src/retry.js', note: '対象' }] });
 
   // 1回目の評価: 決定的評価がFAIL → next-action=FIX（LLMのPASSでは覆らない）
@@ -117,11 +117,39 @@ test('閉ループ1周（Phase 1〜3の垂直スライス）', () => {
   });
   assert.strictEqual(evaluate.nextAction(osDir, task.id).action, 'FIX');
 
-  // 修正して再評価 → DONE
+  // 修正して再評価 → 評価ゲート緑 = DELIVER（納品可能。完了ではない）
   write(root, 'src/retry.js', 'function retry(f, key) { seen.add(key); return f(); }\nconst seen = new Set();\n');
   res = evaluate.evaluateTask(osDir, task.id, { workDir: root, replay: { requirement_satisfied: 'PASS' } });
   const na = evaluate.nextAction(osDir, task.id);
-  assert.strictEqual(na.action, 'DONE');
+  assert.strictEqual(na.action, 'DELIVER');
+
+  // 納品は宣言なしには通らない
+  assert.throws(() => evaluate.deliver(osDir, task.id), /宣言が1件も無い/);
+
+  // 宣言を登録して納品: 即時反証はCoreが執行し、deferredは検収待ちで残る
+  const claims = require('../core/claims');
+  claims.newClaim(osDir, {
+    task: task.id,
+    body: '冪等性キーの記録が実装に存在する',
+    falsifier: { type: 'file_matches', path: 'src/retry.js', pattern: 'seen\\.add' },
+  });
+  const deferred = claims.newClaim(osDir, {
+    task: task.id,
+    body: 'この修正はタイムアウト設定を壊していない',
+    falsifier: { type: 'deferred', how: '運用でタイムアウト起因の障害が出たら剥がれる' },
+  });
+  const dv = evaluate.deliver(osDir, task.id);
+  assert.strictEqual(dv.status, 'delivered'); // 検収待ちの宣言が残っている
+  assert.strictEqual(evaluate.nextAction(osDir, task.id).action, 'AWAIT_SETTLEMENT');
+
+  // 現実が採点して全宣言heldになれば settled
+  claims.settleClaim(osDir, deferred.id, {
+    result: 'held',
+    evidence: ['運用7日でタイムアウト起因の障害は0件'],
+    source: 'ops',
+  });
+  assert.strictEqual(evaluate.getTask(osDir, task.id).status, 'settled');
+  assert.strictEqual(evaluate.nextAction(osDir, task.id).action, 'SETTLED');
 
   // --- Phase 3: feedback → Failure状態機械 → golden task → regression ---
   const fb = failure.report(osDir, { symptom: 'retry修正がタイムアウト値を壊した', severity: 'high', task: task.id });

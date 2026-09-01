@@ -100,7 +100,7 @@ test('next-action: 決定的FAILはLLMのPASSで覆せない', () => {
   assert.ok(r.why.includes('覆せない'));
 });
 
-test('next-action: §11の写像（UNCERTAIN/insufficient/model_limitation/missing/DONE）', () => {
+test('next-action: §11の写像（UNCERTAIN/insufficient/model_limitation/missing/DELIVER）', () => {
   const { osDir } = makeOs();
   const t = evaluate.newTask(osDir, 'map', ['a', 'b']);
   // 片方未記録 → COLLECT_EVIDENCE
@@ -117,10 +117,10 @@ test('next-action: §11の写像（UNCERTAIN/insufficient/model_limitation/missi
   // （同じ強さで調べ直しても解けなかったという記録。詳細は next-action-escalation.test.js）
   evaluate.recordVerdict(osDir, { task: t.id, evaluator: 'b', verdict: 'UNCERTAIN', evidence: ['e'] });
   assert.strictEqual(evaluate.nextAction(osDir, t.id).action, 'DEEP_RESEARCH');
-  // 全PASS → DONE（タスクstatusも更新される）
+  // 全PASS → DELIVER（納品はdeliverが行うので、statusはopenのまま）
   evaluate.recordVerdict(osDir, { task: t.id, evaluator: 'b', verdict: 'PASS', evidence: ['e'] });
-  assert.strictEqual(evaluate.nextAction(osDir, t.id).action, 'DONE');
-  assert.strictEqual(evaluate.getTask(osDir, t.id).status, 'done');
+  assert.strictEqual(evaluate.nextAction(osDir, t.id).action, 'DELIVER');
+  assert.strictEqual(evaluate.getTask(osDir, t.id).status, 'open');
 });
 
 test('task: work_dir/refs/notesの引き継ぎ文脈と、evaluateのwork_dirフォールバック', () => {
@@ -155,7 +155,7 @@ test('task: work_dir/refs/notesの引き継ぎ文脈と、evaluateのwork_dirフ
   assert.throws(() => evaluate.addTaskNote(osDir, t.id, ''), /noteが必要/);
 });
 
-test('next-action DONE: 接地していない成功基準をcaveatsとして必ず添える', () => {
+test('next-action DELIVER: 接地していない成功基準をcaveatsとして必ず添える', () => {
   const { osDir } = makeOs();
   write(osDir, 'evaluators/bound.yaml', [
     'id: bound',
@@ -184,7 +184,7 @@ test('next-action DONE: 接地していない成功基準をcaveatsとして必�
   const t = evaluate.newTask(osDir, 'caveats', ['bound']);
   evaluate.recordVerdict(osDir, { task: t.id, evaluator: 'bound', verdict: 'PASS', evidence: ['e'], provenance: 'deterministic' });
   const r = evaluate.nextAction(osDir, t.id);
-  assert.strictEqual(r.action, 'DONE');
+  assert.strictEqual(r.action, 'DELIVER');
   // evaluatorがPASSしても、判定器の無い目的は「測れていない」と明示される
   assert.ok(r.caveats.some((c) => c.includes('sc-002') && c.includes('測定できていない')), JSON.stringify(r.caveats));
   // 実行実績のあるbound側はcaveatに現れない

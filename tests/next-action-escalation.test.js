@@ -47,7 +47,7 @@ test('escalation: 同じ状態への判定が食い違ったら RESOLVE_CONFLICT
 // F012: run-task 手順6が指示する FAIL → 修正 → PASS を、矛盾と読み違えない。
 // 読み違えると、正直に是正したタスクほど完了に到達できなくなる（実測: T016）。
 // 成果物の再登録より前の判定は「別の状態への判定」であり、いまの状態への矛盾ではない。
-test('escalation: 成果物の再登録より前の判定は食い違いに数えない（是正の系列はDONEに到達する）', () => {
+test('escalation: 成果物の再登録より前の判定は食い違いに数えない（是正の系列はDELIVERに到達する）', () => {
   const { osDir } = makeOs();
   const t = evaluate.newTask(osDir, '是正の系列', ['a']);
   evaluate.addArtifact(osDir, t.id, { path: 'src/a.js', note: '実装', ts: '2026-01-01T00:00:00Z' });
@@ -60,7 +60,7 @@ test('escalation: 成果物の再登録より前の判定は食い違いに数�
   // 指摘を直して登録し直す（= 以後の判定の対象は別の状態になる。tsは記録済み判定より後）
   evaluate.addArtifact(osDir, t.id, { path: 'src/a.js', note: '指摘への修正', ts: '2099-01-01T00:00:00Z' });
   const r = evaluate.nextAction(osDir, t.id);
-  assert.strictEqual(r.action, 'DONE');
+  assert.strictEqual(r.action, 'DELIVER');
   assert.ok(!r.escalation || !r.escalation.signals.includes('conflicting_evidence'));
 });
 
@@ -73,7 +73,7 @@ test('escalation: deterministicの再測定は食い違いに数えない', () =
   verdict(osDir, t.id, 'a', 'FAIL', { provenance: 'deterministic' });
   verdict(osDir, t.id, 'a', 'PASS', { provenance: 'deterministic' });
   const r = evaluate.nextAction(osDir, t.id);
-  assert.strictEqual(r.action, 'DONE');
+  assert.strictEqual(r.action, 'DELIVER');
   assert.ok(!r.escalation || !r.escalation.signals.includes('conflicting_evidence'));
 });
 
@@ -88,13 +88,13 @@ test('escalation: 未知fingerprintのFailureが未消化なら INVESTIGATE に 
   assert.strictEqual(r.escalation.escalate, true);
 });
 
-test('escalation: 全PASSのDONEには昇格をかけない', () => {
+test('escalation: 全PASS（DELIVER）には昇格をかけない', () => {
   const { osDir } = makeOs();
   const t = evaluate.newTask(osDir, '昇格しない', ['a']);
   failure.report(osDir, { symptom: '未知の症状', task: t.id });
   verdict(osDir, t.id, 'a', 'PASS');
   const r = evaluate.nextAction(osDir, t.id);
-  assert.strictEqual(r.action, 'DONE');
+  assert.strictEqual(r.action, 'DELIVER');
   // シグナルの記録は残るが、actionは書き換えない
   assert.ok(r.escalation.signals.includes('unknown_fingerprint'));
 });

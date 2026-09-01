@@ -32,6 +32,16 @@ description: ユーザーの不満をヒアリングしてFailureとして起票
 
        node cli/index.js feedback "<症状>" --task <id> --severity <low|medium|high>
 
+2.5. **不満が剥がした宣言を検収する。** タスクが分かるなら、そのタスクの宣言を引き、
+   不満が反証している宣言があれば broke を記録する（納品済みタスクはopenへ戻り、
+   宣言と実際の乖離が較正台帳に恒久記録される — 監査率がこの記録で決まる）:
+
+       node cli/index.js claim list --task <id>
+       node cli/index.js claim settle <C000x> --result broke --evidence "<ユーザーの報告した事実>" --source user
+
+   該当する宣言が無いなら、それ自体が発見である: **この症状は宣言の被覆から漏れていた**。
+   investigate-failure に「なぜこの主張は宣言に載らなかったか」を引き継ぐ。
+
 3. 出力のfingerprint判定で振り分ける:
 
    | 出力 | 行動 |

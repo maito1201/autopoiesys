@@ -155,7 +155,7 @@ function unconsolidatedDone(osDir) {
   const out = [];
   for (const id of Object.keys(byId).sort()) {
     const t = byId[id];
-    if (t.status !== 'done' || t.consolidated) continue;
+    if (!require('./evaluate').isCompleted(t) || t.consolidated) continue;
     out.push({ id: t.id, objective: t.objective, class: t.class || null });
   }
   return out;

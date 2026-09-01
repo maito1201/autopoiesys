@@ -32,6 +32,11 @@ const WEIGHTS = {
   // 完了したタスクで下したのに結果が未記録の決定。放置すると決定層は帳簿のまま
   // 経験にならないが、単発の答え合わせは未消化のFailureより軽い
   unreviewed_decision: 0.45,
+  // 納品済みタスクの検収待ちの宣言。検収されない宣言は較正に入らず、
+  // 信用価格（監査率）が永久に動かない — 制度の背骨なので蒸留より上に置く
+  unsettled_claim: 0.55,
+  // 期限（due）を過ぎた検収待ちの宣言。現実はもう答えを持っている
+  overdue_claim: 0.75,
 };
 
 // 既に着手されている項目の減衰率。消さずに下げる — 着手したまま放置されている仕事は
@@ -123,7 +128,7 @@ function contestedLessonItems(osDir) {
 function unconsolidatedTaskItems(osDir) {
   const items = [];
   for (const t of Object.values(require('./evaluate').loadTasks(osDir))) {
-    if (t.status !== 'done') continue;
+    if (!require('./evaluate').isCompleted(t)) continue;
     if (t.consolidated) continue;
     items.push({
       kind: 'unconsolidated_task',
@@ -182,13 +187,45 @@ function unreviewedDecisionItems(osDir) {
     for (const d of b.decisions) {
       if (!d.task || d.outcomes.length) continue;
       const t = tasksById[d.task];
-      if (!t || t.status !== 'done') continue;
+      if (!t || !require('./evaluate').isCompleted(t)) continue;
       items.push({
         kind: 'unreviewed_decision',
         ref: d.id,
         why: `「${b.situation}」で${d.chosen ? `「${d.chosen}」を選んだ` : '決めた'}が、期待どおりになったか未記録（${d.task} は完了済み）`,
         score: WEIGHTS.unreviewed_decision,
         action: `node cli/index.js decision outcome ${d.id} --result met|unmet|unclear --note "<何が起きたか>"`,
+      });
+    }
+  }
+  return items;
+}
+
+// ---- 材料e'': 納品済みタスクの検収待ちの宣言（deferred / user）。
+// 検収されない宣言は較正台帳に入らず、宣言と実際の乖離は永久に測れない。
+// 期限（due）を過ぎたものは現実が既に答えを持っているので優先度を上げる。
+function unsettledClaimItems(osDir) {
+  const evaluate = require('./evaluate');
+  const tasks = evaluate.loadTasks(osDir);
+  const { byTask } = require('./claims').loadClaims(osDir);
+  const today = new Date().toISOString().slice(0, 10);
+  const items = [];
+  for (const taskId of Object.keys(byTask).sort()) {
+    const t = tasks[taskId];
+    if (!t || !evaluate.isCompleted(t)) continue;
+    for (const c of byTask[taskId]) {
+      if (c.state !== 'pending' || !c.falsifier) continue;
+      const f = c.falsifier;
+      const overdue = f.due && String(f.due) <= today;
+      items.push({
+        kind: overdue ? 'overdue_claim' : 'unsettled_claim',
+        ref: c.id,
+        why: overdue
+          ? `宣言「${c.body}」の検収期限（${f.due}）を過ぎている。現実はもう答えを持っている`
+          : `宣言「${c.body}」（${taskId}）が検収待ち。${f.how || '反証手続きを執行する'}`,
+        score: overdue ? WEIGHTS.overdue_claim : WEIGHTS.unsettled_claim,
+        action: (f.type === 'deferred' || f.type === 'user')
+          ? `node cli/index.js claim settle ${c.id} --result held|broke --evidence "<現実の観測>"`
+          : `node cli/index.js claim settle ${c.id}`,
       });
     }
   }
@@ -312,6 +349,13 @@ const ORGANS = [
     zero_means: '申告が申告者自身のまま確定していて、経験再利用の主張に裏づけが無い',
     next: 'node cli/index.js experience audit <task> を回し、別文脈の判定者に記録させる',
   },
+  {
+    id: 'claim_settlement',
+    what: '宣言の検収（現実が採点した記録。較正台帳の原資）',
+    where: 'claims/ledger.jsonl の kind: settlement',
+    zero_means: '宣言が検収されておらず、較正（乖離率）が動かない — 監査率も永久に下がらない',
+    next: 'node cli/index.js claim settle <C000x>（executableは即時、deferredは結果判明時に記録）',
+  },
 ];
 
 // 器官の記録を数える。**読めなかったことを0件と混同しない**（F008の教訓:
@@ -363,6 +407,9 @@ function countOrganRecords(osDir, organ) {
   if (organ.id === 'claim_audit') {
     return countJsonl(path.join('observations', 'claim_audit.jsonl'));
   }
+  if (organ.id === 'claim_settlement') {
+    return countJsonl(path.join('claims', 'ledger.jsonl'), (r) => r.kind === 'settlement');
+  }
   throw new Error(`器官の数え方が未定義: ${organ.id}`);
 }
 
@@ -374,7 +421,8 @@ function deadOrganItems(osDir) {
   for (const r of readJsonl(path.join(osDir, 'tasks', 'tasks.jsonl'))) {
     if (r && r.id) tasks[r.id] = { ...(tasks[r.id] || {}), ...r };
   }
-  if (!Object.values(tasks).some((t) => t.status === 'done' || t.last_action === 'DONE')) return [];
+  if (!Object.values(tasks).some((t) => require('./evaluate').isCompleted(t)
+    || ['DELIVER', 'AWAIT_SETTLEMENT', 'SETTLED', 'DONE'].includes(t.last_action))) return [];
   const items = [];
   const failed = [];
   for (const organ of ORGANS) {
@@ -459,7 +507,7 @@ function resolveOrigin(osDir, origin) {
 function inFlightRefs(osDir) {
   const map = {};
   for (const t of Object.values(require('./evaluate').loadTasks(osDir))) {
-    if (t.status === 'done') continue;
+    if (require('./evaluate').isCompleted(t)) continue;
     const ref = t.origin_verified && t.origin_verified.ref;
     if (!ref) continue;
     (map[ref] = map[ref] || []).push(t.id);
@@ -490,6 +538,7 @@ function agenda(osDir, { resolveOrigins = true } = {}) {
     ...collect(warnings, '未蒸留の完了タスク', () => unconsolidatedTaskItems(osDir)),
     ...collect(warnings, '未測定の基準', () => unmeasuredCriterionItems(osDir)),
     ...collect(warnings, '結果未記録の決定', () => unreviewedDecisionItems(osDir)),
+    ...collect(warnings, '検収待ちの宣言', () => unsettledClaimItems(osDir)),
     ...collect(warnings, '未消化の提案', () => proposalItems(osDir)),
     ...collect(warnings, '動いていない器官', () => deadOrganItems(osDir)),
   ];

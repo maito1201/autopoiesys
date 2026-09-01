@@ -368,6 +368,19 @@ function auditReachability(osDir, { maxCombos = 500, maxRunsPerQuery = 4000, max
       }
     }
   }
+  // lessonはQueryではなく想起（task new --class → experience.digest）で届く設計であり、
+  // task_classを持つlessonは同類型の再来時に必ず配信される。この経路を数えないと、
+  // 正しく書かれた教訓が「引けない事実」として恒久の偽FAILになる（実測: .os の
+  // wm_reachability が lesson 14件で赤を出し続け、regressionが常時失敗していた）。
+  // task_classの無いlessonはQuery経路でしか届かないため、監査対象のまま残す。
+  let reachedViaDigest = 0;
+  for (const st of statements) {
+    if (st.type === 'lesson' && typeof st.task_class === 'string' && st.task_class.trim()
+        && !reached.has(st.id)) {
+      reached.add(st.id);
+      reachedViaDigest += 1;
+    }
+  }
   const unreachable = allIds.filter((id) => !reached.has(id)).sort();
   // 違反は「到達不能」と「監査不能」に限る。max_tokensによる切り詰めはページングで追えるので
   // 設計（§26⑤）どおりであり、追ってもなお返らないもの（limitに阻まれた事実）だけを違反とする。
@@ -375,6 +388,7 @@ function auditReachability(osDir, { maxCombos = 500, maxRunsPerQuery = 4000, max
     statement_count: allIds.length,
     query_count: names.length,
     reached: reached.size,
+    reached_via_digest: reachedViaDigest,
     unreachable,
     truncating,
     defects,

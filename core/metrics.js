@@ -138,6 +138,57 @@ function computeMetrics(osDir) {
     // World Model未整備でもmetrics全体を落とさない
   }
 
+  // 制度の計器。このOSが機能しているかを決める唯一のグラフは
+  // 「タスクあたり検収の限界トークン（LLM判定のbriefing実測）が下がっているか」である。
+  // 下がる構造 = 失敗の検出器化（CAPEX）・較正による抜き取り化・現実への転嫁が効いている。
+  // 平坦なら、このOSはただのバトル会場である。
+  let institution = null;
+  try {
+    const claims = require('./claims');
+    const calibration = claims.calibration(osDir);
+    // 類型ごとの較正（宣言のあるタスクの類型だけ）
+    const byClass = {};
+    for (const t of Object.values(tasks)) {
+      if (!t.class_fp || byClass[t.class_fp]) continue;
+      const cal = claims.calibration(osDir, { classFp: t.class_fp });
+      if (cal.claims) byClass[t.class_fp] = { class: t.class, ...cal };
+    }
+    // 監査経済: 実施した判定（briefing生成）と免除（sampled_out）・同一状態スキップ
+    const audit = { briefings: 0, sampled_out: 0, skipped_unchanged: 0 };
+    for (const c of contextLog) {
+      if (c.kind === 'briefing') audit.briefings++;
+      else if (c.kind === 'audit_sampled_out') audit.sampled_out++;
+      else if (c.kind === 'briefing_skipped') audit.skipped_unchanged++;
+    }
+    // 検収限界コストの系列: 完了タスクごとのbriefing実測トークン（タスクid順 = 時系列近似）。
+    // 傾向は前半平均と後半平均の比較（実測が4件未満なら出さない — 2点で傾向を語らない）
+    const completed = Object.values(tasks)
+      .filter((t) => require('./evaluate').isCompleted(t))
+      .map((t) => t.id)
+      .sort();
+    const series = completed.map((id) => ({ task: id, briefing_tokens: contextPerTask[id] || 0 }));
+    let trend = null;
+    if (series.length >= 4) {
+      const half = Math.floor(series.length / 2);
+      const avg = (a) => a.reduce((s, x) => s + x.briefing_tokens, 0) / a.length;
+      const first = avg(series.slice(0, half));
+      const second = avg(series.slice(-half));
+      trend = {
+        first_half_avg: Math.round(first),
+        second_half_avg: Math.round(second),
+        falling: second < first,
+      };
+    }
+    institution = {
+      calibration,
+      calibration_by_class: byClass,
+      audit,
+      verification_marginal: { series, trend },
+    };
+  } catch {
+    // claims台帳が未整備でもmetrics全体を落とさない
+  }
+
   // Failure集計
   const failureList = Object.values(failures);
   const openFailures = failureList.filter((f) => !TERMINAL.includes(f.state));
@@ -147,7 +198,7 @@ function computeMetrics(osDir) {
   return {
     tasks: {
       total: taskList.length,
-      done: taskList.filter((t) => t.status === 'done').length,
+      done: taskList.filter((t) => require('./evaluate').isCompleted(t)).length,
     },
     tokens: {
       total: totalTokens,
@@ -183,6 +234,7 @@ function computeMetrics(osDir) {
       open: openFailures.length,
       human_interventions: humanInterventions,
     },
+    institution,
     compile_candidates: compileCandidates,
   };
 }

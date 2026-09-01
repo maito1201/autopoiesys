@@ -27,7 +27,11 @@
    → エージェントが .os/queries/ 経由で文脈を取得（制約・過去の失敗を必ず読む）
    → 実装
    → OSが独立評価（.os/evaluators/）— エージェントの「できました」は使われない
-   → PASSならDONE、FAILなら差し戻し。完了を決めるのはOS
+   → 全PASSならDELIVER（納品可能）、FAILなら差し戻し
+   → 納品は「宣言 + 反証手続き」の形でしか通らない（claim new → task deliver）
+   → 検収は現実が行う: コマンドはCoreが執行、時間・運用の宣言は後日 claim settle で採点
+   → 剥がれた宣言（broke）はタスクをopenへ戻し、乖離が較正台帳に恒久記録される
+   → 較正の良い類型はllm_judgeが抜き取り検査になる（監査率が下がる = 検収が安くなる）
 
 あなた「駄目だった」
    → Failure台帳に起票 → 根本原因と「なぜOSは防げなかったか」を調査
@@ -46,7 +50,7 @@ Claude Codeでこのリポジトリを開き、開発タスクは `/run-task` �
 /run-task READMEのクイックスタートに不足している手順を直して
 ```
 
-エージェントではなくOSがDONEを宣言したら完了。途中でFIX/INVESTIGATEが出るのは正常動作
+エージェントではなくOSが納品（delivered）と検収（settled）を認定したら完了。途中でFIX/INVESTIGATEが出るのは正常動作
 （OSが仕事を突き返している）。あなたは結果だけ見ればよい。
 
 ## 3. 駄目だったとき（ここでOSが育つ）
@@ -222,7 +226,12 @@ node cli/index.js metrics --json
 | context.briefing_tokens_total | 評価に渡した文脈の量（**コアの実測**） | 同種タスクで下がる |
 | verdicts.deterministic_ratio | 決定的評価の比率 | 上がる |
 | failures.open | 未消化の失敗 | 0に保つ |
+| institution.calibration.gap_rate | 宣言と実際の乖離率（broke/settled） | 下がる（AIの較正そのもの） |
+| institution.verification_marginal.trend | タスクあたり検収の限界トークン | **falling: true**（これが平坦なら検収はただのバトル会場） |
+| institution.audit.sampled_out | 較正実績が買った監査免除の件数 | 増える（信頼が検収コストを下げている証拠） |
 | compile_candidates | 「これを資産化せよ」というOSからの提案 | 出たら対応 |
+
+較正と監査率の現在値は `node cli/index.js trust` でいつでも引ける。
 
 もう1つの重要な穴リスト:
 
@@ -312,7 +321,7 @@ git -C .os init
 
 ## 8. やってはいけないこと
 
-- エージェントの「完了しました」を信じてタスクを閉じる（next-actionがDONEを返すまで未完了）
+- エージェントの「完了しました」を信じてタスクを閉じる（task deliverが通り、宣言の検収が閉じるまで未完了）
 - `.os/` の台帳（*.jsonl）を手で編集する（検証を迂回すると評価の信用が壊れる。
   goal.yamlやevaluatorの**定義**を編集するのは問題ない — その後 `check` を通すこと）
 - feedbackを言わずに我慢する（不満はOSにとって唯一無二の学習データ。遠慮は成長の機会損失）

@@ -73,12 +73,12 @@ test('evaluatorをタスクから外しても記録済みFAILは視界から消�
   assert.strictEqual(evaluate.nextAction(osDir, t.id).action, 'FIX');
 });
 
-test('一度DONEでも新たなFAILでstatusがopenに戻る', () => {
+test('一度納品可能（DELIVER）でも新たなFAILでopen側に戻る', () => {
   const { osDir } = makeOs();
   const t = evaluate.newTask(osDir, '再開テスト', ['a']);
   evaluate.recordVerdict(osDir, { task: t.id, evaluator: 'a', verdict: 'PASS', evidence: ['e'] });
-  assert.strictEqual(evaluate.nextAction(osDir, t.id).action, 'DONE');
-  assert.strictEqual(evaluate.getTask(osDir, t.id).status, 'done');
+  assert.strictEqual(evaluate.nextAction(osDir, t.id).action, 'DELIVER');
+  assert.strictEqual(evaluate.getTask(osDir, t.id).status, 'open');
   evaluate.recordVerdict(osDir, { task: t.id, evaluator: 'a', verdict: 'FAIL', evidence: ['e'], provenance: 'deterministic' });
   assert.strictEqual(evaluate.nextAction(osDir, t.id).action, 'FIX');
   assert.strictEqual(evaluate.getTask(osDir, t.id).status, 'open');
@@ -354,7 +354,7 @@ test('check: outcome型の判定器で裏付けられていない成功基準を
   assert.ok(!schema.checkAll(osDir).warnings.some((w) => w.includes('sc-001')));
 });
 
-test('CLI next-action: DONEのcaveatsを出力から落とさない', () => {
+test('CLI next-action: DELIVERのcaveatsを出力から落とさない', () => {
   const { root, osDir } = makeOs();
   write(root, 'README.md', '# x\n');
   write(osDir, 'evaluators/bound.yaml', [
@@ -385,7 +385,7 @@ test('CLI next-action: DONEのcaveatsを出力から落とさない', () => {
   const cli = path.join(__dirname, '..', 'cli', 'index.js');
   const r = spawnSync(process.execPath, [cli, 'next-action', t.id, '--os-dir', osDir], { encoding: 'utf8' });
   assert.strictEqual(r.status, 0, r.stderr);
-  assert.ok(r.stdout.includes('action: DONE'), r.stdout);
+  assert.ok(r.stdout.includes('action: DELIVER'), r.stdout);
   // コアが返すcaveatsがCLI出力に現れる（ここが落ちるとDONEが「Goalが測れている」と読まれる）
   assert.ok(r.stdout.includes('caveats:'), r.stdout);
   assert.ok(r.stdout.includes('sc-002'), r.stdout);

@@ -11,6 +11,17 @@ const { runQuery } = require('./query');
 const { buildReasoningContext } = require('./context');
 
 const VERDICTS = ['PASS', 'FAIL', 'UNCERTAIN'];
+// タスクの完了は2段階に分かれる（納品と検収の分離）:
+//   delivered = 納品済み（評価ゲート通過 + 宣言登録 + 即時執行可能な反証手続きが全てheld）
+//   settled   = 検収済み（deferred/userの宣言まで全てheldで確定）
+// 'done' は旧形式の台帳との互換のためだけに完了として読む（新規には書かない）。
+// 納品時に完了が確定する構造は「もっともらしさに報酬が確定する」構造そのものなので、
+// 検収は現実（コマンド・時間・ユーザー）が後から行い、剥がれたらopenへ戻る。
+const COMPLETED_STATUSES = ['delivered', 'settled', 'done'];
+
+function isCompleted(t) {
+  return !!t && COMPLETED_STATUSES.includes(t.status);
+}
 // insufficient_sample: 「やり方を変えれば届く」証拠不足（insufficient_evidence）と、
 // 「入力そのものが足りず原理的に届かない」検出力不足を区別する。混ぜると、
 // 標本を増やすべき場面で手法の作り直しを繰り返す（E3 / kabu core-underpowered-goal-state）。
@@ -394,6 +405,48 @@ function foldArtifacts(task, sinceTs) {
   }));
 }
 
+// 宣言（claims）の節。判定者の仕事は「良い仕事か」の印象採点ではなく、
+// ①宣言が成果物の実物と一致するか ②検証可能な主張に反証手続きが付いているか
+// ③宣言が原文の要求を覆っているか、の照合である — 印象採点はもっともらしさを
+// 報酬する勾配（カスのコンサル勾配）であり、判定者自身がそれに乗ってはならない。
+function claimsSection(osDir, task) {
+  let claims = [];
+  try {
+    claims = require('./claims').loadClaims(osDir).byTask[task.id] || [];
+  } catch {
+    claims = [];
+  }
+  const parts = ['## 納品の宣言（claims台帳。実行者が納品時に縛られる主張）', ''];
+  if (!claims.length) {
+    parts.push('**このタスクにはまだ宣言が登録されていない。** 納品は宣言なしには通らないが、');
+    parts.push('この判定の時点で成果物が何を主張しているのかは、報告本文の散文にしか無い。');
+    parts.push('散文の主張は証拠として扱わないこと。');
+    parts.push('');
+    return parts;
+  }
+  for (const c of claims) {
+    const f = c.falsifier;
+    const how = !f
+      ? `反証不能（開示: ${c.unfalsifiable_reason}）`
+      : f.type === 'command'
+        ? `command: ${JSON.stringify(f.argv)}`
+        : (f.type === 'deferred' || f.type === 'user')
+          ? `${f.type}: ${f.how}${f.due ? `（期限 ${f.due}）` : ''}`
+          : `${f.type} ${f.path} /${f.pattern}/`;
+    parts.push(`- ${c.id} [${c.state}] ${c.body}`);
+    parts.push(`  - 反証手続き: ${how}`);
+  }
+  parts.push('');
+  parts.push('あなたの照合対象は次の3点である（印象採点ではない）:');
+  parts.push('1. **宣言と実物の一致**: 各宣言は成果物の実物と一致しているか');
+  parts.push('2. **宣言の被覆**: 成果物が事実上主張していることのうち、宣言に載っていない主張は無いか');
+  parts.push('   （検証可能なのに宣言から漏れた主張は、検収を逃れる経路である）');
+  parts.push('3. **反証手続きの強度**: 反証手続きは宣言の内容に実際に届いているか');
+  parts.push('   （宣言と無関係に常にheldになる手続きは、手続きの体裁をした無検査である）');
+  parts.push('');
+  return parts;
+}
+
 // fullContext: 旧方式（context_queriesの結果全文をJSONで埋め込む）。A/B実験のbaseline用に残す。
 // 既定は buildReasoningContext による最小Subgraph（CONCEPTv2 §8）。
 function prepareLlmJudge(osDir, def, { task, artifacts, fullContext = false, sinceTs } = {}) {
@@ -406,6 +459,25 @@ function prepareLlmJudge(osDir, def, { task, artifacts, fullContext = false, sin
   parts.push(`## 対象タスク: ${task.id}`);
   parts.push(`Objective: ${task.objective}`);
   parts.push('');
+  // 原文接地: objectiveは実行者の言い換えで、意図の曲解は言い換えの瞬間に起きる。
+  // 原文が焼き込まれていれば、判定の第一項は原文との照合になる。
+  if (task.verbatim) {
+    parts.push('## ユーザー依頼の原文（登録時に固定・不可変）');
+    parts.push('');
+    parts.push('```');
+    parts.push(String(task.verbatim).trimEnd());
+    parts.push('```');
+    parts.push('');
+    parts.push('**上のObjectiveは実行者による言い換えである。** 成果物がこの原文の意図から');
+    parts.push('逸れていないか（要求の縮小・すり替え・楽な解釈への流し込みが無いか）を、');
+    parts.push('rubricの判定に先立って確かめること。');
+    parts.push('');
+  } else {
+    parts.push('**注意: このタスクにはユーザー依頼の原文が記録されていない。**');
+    parts.push('Objectiveが依頼の正確な写しかどうかは、このbriefingからは検証できない。');
+    parts.push('');
+  }
+  parts.push(...claimsSection(osDir, task));
   const folded = foldArtifacts(task, sinceTs);
   const changed = folded.filter((a) => a.changed);
   parts.push('## Artifact');
@@ -568,6 +640,12 @@ function newTask(osDir, objective, evaluators, extra = {}) {
   const byId = loadTasks(osDir);
   const id = nextId('T', Object.keys(byId), 3);
   const entry = { id, ts: nowIso(), objective, status: 'open', artifacts: [], evaluators: evaluators || [] };
+  // 原文接地: objectiveは実行者の言い換えであり、意図の曲解は言い換えの瞬間に起きる。
+  // ユーザー依頼の原文を不可変で焼き込み、目的適合の判定対象を原文に接地させる。
+  if (extra.verbatim) {
+    entry.verbatim = String(extra.verbatim);
+    entry.verbatim_sha = require('./util').sha1(entry.verbatim.replace(/\r\n/g, '\n'));
+  }
   if (extra.work_dir) entry.work_dir = extra.work_dir;
   if (extra.repo_dirs && Object.keys(extra.repo_dirs).length) entry.repo_dirs = extra.repo_dirs;
   if (extra.refs && extra.refs.length) entry.refs = extra.refs;
@@ -623,6 +701,10 @@ function newTask(osDir, objective, evaluators, extra = {}) {
 
 function updateTask(osDir, id, patch) {
   const t = getTask(osDir, id);
+  // 原文は不可変。書き換えられる原文は接地にならない（判定対象を後から動かせる）
+  if (patch.verbatim !== undefined && t.verbatim !== undefined && patch.verbatim !== t.verbatim) {
+    throw new Error(`${id} の原文（verbatim）は登録後に変更できない`);
+  }
   const entry = { ...t, ...patch, id, ts: nowIso() };
   appendJsonl(tasksFile(osDir), entry);
   return entry;
@@ -730,6 +812,41 @@ function evaluateTask(osDir, taskId, { only, workDir, replay } = {}) {
         });
         results.push({ evaluator: evId, method: def.method, ...entry });
       } else {
+        // 監査抽選（裁量という賭け金）。較正実績が良い類型のllm_judgeは確率的に
+        // 抜き取り検査になる — 検査の緩和が許されるのは緑の実績に対してだけで、
+        // 前回verdictが非PASS・履歴不足・直近に剥がれた宣言がある場合は必ず監査する。
+        // 抽選は (task, evaluator, 成果物時刻) のハッシュで決定的: 引き直しで回避できない。
+        const priorJudgments = readJsonl(verdictLog(osDir)).filter(
+          (r) => r.task === taskId && r.evaluator === evId && (r.provenance === 'llm' || r.provenance === 'human')
+        );
+        const lastVerdict = priorJudgments[priorJudgments.length - 1] || null;
+        const decision = require('./claims').auditDecision(osDir, task, def, { lastVerdict });
+        if (!decision.audit) {
+          // 検査しなかった事実は第一級の記録である（偽PASSを書いて済ませない —
+          // 元帳への偽造は、本物の記録の条件付けの力まで割り引く）
+          appendJsonl(path.join(osDir, 'observations', 'context_log.jsonl'), {
+            ts: nowIso(),
+            kind: 'audit_sampled_out',
+            task: taskId,
+            evaluator: evId,
+            p: decision.p,
+            draw: decision.draw,
+            basis: decision.basis,
+            tokens_est: 0,
+          });
+          results.push({
+            evaluator: evId,
+            method: def.method,
+            pending: false,
+            skipped: 'sampled_out',
+            p: decision.p,
+            basis: decision.basis,
+            why: `較正実績により抜き取り検査の対象外（p=${decision.p.toFixed(2)}, ${decision.basis}）。`
+              + '判定は行われない。この緩和は宣言の検収実績が買ったものであり、'
+              + '宣言が剥がれれば全数監査に戻る',
+          });
+          continue;
+        }
         // 同じ状態を二度判定させない。前回の判定以降に成果物が1件も変わっていないなら、
         // 新しいbriefingは前回と同じものになり、判定者の探索（1本あたり数万トークン）が
         // まるごと無駄になる。成果物を1件でも登録すれば再び生成される
@@ -931,6 +1048,9 @@ function escalationSignals(osDir, task, hist) {
 // Next Action Engine（設計原則§11）。決定的FAILはLLM判定で覆せない。
 // 対象evaluatorは task.evaluators と verdict記録済みevaluatorの和集合 —
 // 評価後にevaluatorを外しても、記録済みFAILは視界から消えない。
+//
+// 終端はDONEではない。全ゲート緑は「納品してよい」（DELIVER）であって完了ではなく、
+// 納品後は宣言の検収（AWAIT_SETTLEMENT → SETTLED）が現実によって進む。
 function nextAction(osDir, taskId) {
   const task = getTask(osDir, taskId);
   const latest = latestVerdicts(osDir, taskId);
@@ -943,6 +1063,33 @@ function nextAction(osDir, taskId) {
     if (!latest[evId]) missing.push(evId);
     else detail.push(latest[evId]);
   }
+  // 監査免除（waived）: verdictが無いllm_judgeのうち、監査抽選が「検査しない」と
+  // 決めたもの。判定は evaluateTask と同じ決定的抽選なので、ここで独立に引き直しても
+  // 同じ結果になる（偽PASSを台帳に書かずに、免除を第一級の状態として扱う）。
+  const waived = [];
+  for (const evId of [...missing]) {
+    let def;
+    try {
+      def = loadEvaluatorDef(osDir, evId);
+    } catch {
+      continue;
+    }
+    if (def.method !== 'llm_judge') continue;
+    const decision = require('./claims').auditDecision(osDir, task, def, { lastVerdict: null });
+    if (!decision.audit) {
+      waived.push({ evaluator: evId, p: decision.p, basis: decision.basis });
+      missing.splice(missing.indexOf(evId), 1);
+    }
+  }
+  // 宣言の状態。剥がれた宣言（broke）は評価ゲートと同格の破れである
+  let taskClaims = [];
+  try {
+    taskClaims = require('./claims').loadClaims(osDir).byTask[taskId] || [];
+  } catch {
+    taskClaims = [];
+  }
+  const brokeClaims = taskClaims.filter((c) => c.state === 'broke');
+  const pendingClaims = taskClaims.filter((c) => c.state === 'pending' && c.falsifier);
   let action;
   let why;
   // insufficient_sample =「やり方を変えれば届く」ではなく「入力が足りず原理的に届かない」。
@@ -962,6 +1109,10 @@ function nextAction(osDir, taskId) {
   } else if (anyFail) {
     action = 'FIX';
     why = `FAIL: ${anyFail.evaluator}`;
+  } else if (brokeClaims.length) {
+    action = 'FIX';
+    why = `宣言が剥がれている: ${brokeClaims.map((c) => `${c.id}「${c.body}」`).join(' / ')}` +
+      '（現実の検収がbrokeを記録した。直した上で、直したことを新しい宣言として登録せよ）';
   } else if (missing.length) {
     action = 'COLLECT_EVIDENCE';
     why = `verdict未記録のevaluator: ${missing.join(', ')}`;
@@ -980,9 +1131,33 @@ function nextAction(osDir, taskId) {
   } else if (uncertain) {
     action = 'INVESTIGATE';
     why = `UNCERTAIN: ${uncertain.evaluator}`;
-  } else if (detail.length && detail.every((v) => v.verdict === 'PASS')) {
-    action = 'DONE';
-    why = `全${detail.length}件のevaluatorがPASS`;
+  } else if (
+    ((detail.length || waived.length) && detail.every((v) => v.verdict === 'PASS'))
+    // evaluator未宣言のタスクでも、宣言の反証手続きが実際に執行されてheldなら
+    // 「現実接触が1つ以上ある」ので緑とする。deferredだけの宣言（純粋な約束）では
+    // ここに来ない — 何も執行していない納品は通らない
+    || (!evaluators.length && taskClaims.some(
+      (c) => c.settlements.some((s) => s.provenance === 'deterministic' && s.result === 'held')
+    ))
+  ) {
+    // 全ゲート緑。ここからは納品と検収の制度が引き継ぐ:
+    //   open      → DELIVER（宣言を登録して task deliver）
+    //   delivered → 保留の宣言が残ればAWAIT_SETTLEMENT、尽きればSETTLED
+    const green = `評価ゲート緑（PASS ${detail.length}件` +
+      (waived.length ? ` / 監査免除 ${waived.length}件` : '') + '）';
+    if (!isCompleted(task)) {
+      action = 'DELIVER';
+      why = `${green}。` + (taskClaims.length
+        ? `宣言${taskClaims.length}件を検収に回す: task deliver ${taskId}`
+        : `納品には宣言（claims）が必要: claim new で成果物の主張と反証手続きを登録してから task deliver ${taskId}`);
+    } else if (pendingClaims.length) {
+      action = 'AWAIT_SETTLEMENT';
+      why = `${green}・納品済み。検収待ちの宣言が${pendingClaims.length}件` +
+        `（${pendingClaims.map((c) => c.id).join(', ')}）。現実が採点するまで完了ではない`;
+    } else {
+      action = 'SETTLED';
+      why = `${green}・全宣言の検収がheldで確定した`;
+    }
   } else {
     action = 'COLLECT_EVIDENCE';
     why = 'verdictが1件もない';
@@ -1000,11 +1175,12 @@ function nextAction(osDir, taskId) {
   // FIXは昇格で上書きしない（直すべきFAILを昇格で覆い隠すと、欠陥が視界から消える）。
   // 同じ状態への判定の食い違いだけはDONEも上書きする — 同じ評価器が同じ状態にPASSとFAILを出したなら、
   // どちらかの判定が誤っている。最新のPASSを採ると、覆った理由を調べずに完了になる。
+  const GREEN_TERMINALS = ['DELIVER', 'AWAIT_SETTLEMENT', 'SETTLED'];
   if (escalation && action !== 'FIX') {
     if (esc.signals.includes('conflicting_evidence')) {
       action = 'RESOLVE_CONFLICT';
       why = `同じ状態への判定が食い違っている: ${esc.evidence.filter((e) => e.includes('食い違')).join(' / ')}`;
-    } else if (action === 'DONE') {
+    } else if (GREEN_TERMINALS.includes(action)) {
       // 全PASSの状態から「もっと高いモデルで見直せ」と言うのは、記録ではなく不安に基づく指示
     } else if (esc.signals.includes('uncertain_verdict')) {
       action = 'DEEP_RESEARCH';
@@ -1015,13 +1191,21 @@ function nextAction(osDir, taskId) {
       why = `${why}（未知のfingerprintのFailureが未消化: ${esc.evidence.filter((e) => e.includes('fingerprint')).join(' / ')}）`;
     }
   }
-  // statusは常に最新のactionに従う（一度doneでも新たなFAILでopenに戻る）
-  updateTask(osDir, taskId, { status: action === 'DONE' ? 'done' : 'open', last_action: action });
+  // statusは最新のactionに従う（納品済みでも新たなFAIL・剥がれた宣言でopenに戻る）。
+  // delivered/settled への遷移は deliver と検収（recordSettlement）だけが行う —
+  // next-action が納品を代行すると、宣言なしの完了経路が復活する。
+  if (task.status !== 'withdrawn') {
+    let status = 'open';
+    if (action === 'SETTLED') status = 'settled';
+    else if (action === 'AWAIT_SETTLEMENT' || (action === 'DELIVER' && isCompleted(task))) status = task.status;
+    updateTask(osDir, taskId, { status, last_action: action });
+  }
   const result = { task: taskId, action, why, verdicts: detail, missing };
+  if (waived.length) result.waived = waived;
   if (escalation) result.escalation = escalation;
-  // DONEは「このタスクのevaluatorが全てPASS」であって「Goalが測れている」ではない。
-  // 接地していない成功基準・制約をcaveatsとして必ず添え、完了報告に明示させる。
-  if (action === 'DONE') {
+  // DELIVERは「このタスクのevaluatorが全てPASS」であって「Goalが測れている」ではない。
+  // 接地していない成功基準・制約をcaveatsとして必ず添え、納品の宣言と報告に明示させる。
+  if (GREEN_TERMINALS.includes(action)) {
     const caveats = unmeasuredCriteria(osDir);
     // 判定器の弱体化はDONEの意味を静かに変える（F014）。登録時の警告を見落としても、
     // 完了を名乗る地点では必ず開示される。「全PASS」が何の全PASSなのかを添える
@@ -1046,6 +1230,79 @@ function nextAction(osDir, taskId) {
   return result;
 }
 
+// 納品（deliver）: 完了の第一段。次を全て満たしたときだけ status: delivered へ遷移する。
+//   1. 宣言（claims）が1件以上ある — 宣言のない納品は「何も約束しない完成」であり通さない
+//   2. 即時執行可能な反証手続きは全て執行済みでheld — 現実が今すぐ剥がせる宣言を
+//      剥がれるか確かめずに納品しない（brokeが1件でもあれば納品は失敗する）
+//   3. 評価ゲートが緑（nextActionがDELIVERを返す状態）
+// deferred/userの宣言は検収待ちとして残り、SETTLEDは現実が後から確定する。
+// 反証不能の宣言は納品を止めないが、納品記録に開示として残る。
+function deliver(osDir, taskId) {
+  const claims = require('./claims');
+  const task = getTask(osDir, taskId);
+  if (task.status === 'withdrawn') throw new Error(`${taskId} は取り下げ済み`);
+  if (isCompleted(task)) throw new Error(`${taskId} は既に納品済み（status: ${task.status}）`);
+  const taskClaims = claims.loadClaims(osDir).byTask[taskId] || [];
+  if (!taskClaims.length) {
+    throw new Error(
+      `${taskId} には宣言が1件も無い。納品物は「宣言 + 反証手続き」の形でしか受け付けない: ` +
+      'claim new で、成果物が主張していること（テスト通過・挙動・効果）と、それを剥がす手続きを登録せよ'
+    );
+  }
+  // 即時執行可能な反証手続きを走らせる（未検収のものだけ。検収済みは状態を尊重する）
+  const settlements = [];
+  for (const c of taskClaims) {
+    if (c.state !== 'pending') continue;
+    if (!c.falsifier || !claims.EXECUTABLE_TYPES.includes(c.falsifier.type)) continue;
+    const r = claims.runFalsifier(osDir, task, c);
+    if (r.result === null) {
+      throw new Error(
+        `${c.id} の反証手続きを実行できない: ${r.evidence.join(' / ') || '実行不能'}。` +
+        '実行できない反証手続きは手続きではない — 直すか、deferredに書き換えよ'
+      );
+    }
+    settlements.push(claims.recordSettlement(osDir, {
+      claim: c.id,
+      result: r.result,
+      evidence: r.evidence,
+      provenance: 'deterministic',
+      source: 'deliver',
+    }));
+  }
+  const after = claims.loadClaims(osDir).byTask[taskId] || [];
+  const broke = after.filter((c) => c.state === 'broke');
+  if (broke.length) {
+    throw new Error(
+      `納品できない。宣言が現実に剥がされた: ${broke.map((c) => `${c.id}「${c.body}」`).join(' / ')}。` +
+      '直してから、直した状態を再度納品せよ'
+    );
+  }
+  // 評価ゲート。nextActionは状態を永続化するので、納品直前の判定として使う
+  const na = nextAction(osDir, taskId);
+  if (na.action !== 'DELIVER') {
+    throw new Error(`納品できない。評価ゲートが緑ではない: ${na.action} — ${na.why}`);
+  }
+  const pending = after.filter((c) => c.state === 'pending' && c.falsifier);
+  const unfalsifiable = after.filter((c) => !c.falsifier);
+  const status = pending.length ? 'delivered' : 'settled';
+  const delivery = {
+    ts: nowIso(),
+    claims: after.length,
+    held: after.filter((c) => c.state === 'held').length,
+    pending: pending.map((c) => c.id),
+    unfalsifiable: unfalsifiable.map((c) => c.id),
+  };
+  if (na.caveats) delivery.caveats = na.caveats;
+  if (na.waived) delivery.waived = na.waived;
+  const updated = updateTask(osDir, taskId, {
+    status,
+    delivered_ts: delivery.ts,
+    delivery,
+    last_action: status === 'settled' ? 'SETTLED' : 'AWAIT_SETTLEMENT',
+  });
+  return { task: updated, status, delivery, settlements };
+}
+
 // goal.yamlのsuccess_criteria/constraintsのうち、判定器が無い（MISSING）か
 // 一度も実行されていない（UNVERIFIED）もの。Gap Analysisの criteria-only と同じ判定。
 function unmeasuredCriteria(osDir) {
@@ -1067,6 +1324,10 @@ function unmeasuredCriteria(osDir) {
 module.exports = {
   VERDICTS,
   EVALUATOR_KINDS,
+  COMPLETED_STATUSES,
+  isCompleted,
+  lastArtifactTs,
+  deliver,
   loadEvaluatorDef,
   listEvaluators,
   validateEvaluatorDef,

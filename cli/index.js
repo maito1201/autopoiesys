@@ -26,6 +26,7 @@ const growth = require('../core/growth');
 const agendaMod = require('../core/agenda');
 const claimaudit = require('../core/claimaudit');
 const contextMod = require('../core/context');
+const claims = require('../core/claims');
 
 function parseArgs(argv) {
   const positional = [];
@@ -525,7 +526,7 @@ const COMMANDS = {
     const sub = args.positional[0];
     if (sub === 'new') {
       const objective = args.positional.slice(1).join(' ');
-      if (!objective) throw new Error('使い方: autopoiesys task new "<objective>" --evaluators a,b [--repos <scope>[=<dir>],...] [--origin <agenda:ref|failure:F00x|lesson:S00xx|unknown:S00xx|user>] [--class \"...\"] [--work-dir D] [--refs url1,url2] [--context "..."]');
+      if (!objective) throw new Error('使い方: autopoiesys task new "<objective>" --evaluators a,b [--verbatim "<ユーザー依頼の原文>"] [--repos <scope>[=<dir>],...] [--origin <agenda:ref|failure:F00x|lesson:S00xx|unknown:S00xx|user>] [--class \"...\"] [--work-dir D] [--refs url1,url2] [--context "..."]');
       const evaluators = args.flags.evaluators ? String(args.flags.evaluators).split(',').map((s) => s.trim()).filter(Boolean) : [];
       // --repos: 横断タスクが触るリポジトリ。scope→作業ディレクトリの対応を作る。
       // =dir を省略した場合は goal.yaml sources のrepoを使う（worktreeで作業する場合は明示する）
@@ -553,8 +554,14 @@ const COMMANDS = {
         context: args.flags.context ? String(args.flags.context) : undefined,
         class: args.flags.class ? String(args.flags.class) : undefined,
         origin: args.flags.origin ? String(args.flags.origin) : undefined,
+        verbatim: args.flags.verbatim ? String(args.flags.verbatim) : undefined,
       });
       out(t, args.flags);
+      // 原文接地の開示。意図の曲解は言い換え（objective化）の瞬間に起きるので、
+      // ユーザー由来のタスクに原文が無いことは、その場で告げる（強制はしない）
+      if (!t.verbatim && (!t.origin || t.origin === 'user')) {
+        process.stdout.write('\nヒント: ユーザー依頼の原文が未登録。--verbatim "<原文>" で焼き込むと、目的適合の判定が実行者の言い換えではなく原文に接地する\n');
+      }
       // 由来の開示（F005 A-3）。内容は強制しない — 無いことだけを告げる。
       // これが無いと「agendaが駆動した仕事」が機械記録にならず、指示なし推進（C4）が
       // 永久に照合不能のままになる
@@ -605,6 +612,14 @@ const COMMANDS = {
         }
       } catch (e) {
         process.stdout.write(`\n（想起の組み立てに失敗: ${e.message}）\n`);
+      }
+      // 較正実績の注入（持続する自己）。宣言が実行を生き延びた記録は、セッションを
+      // 跨いで蓄積され、毎回ここで実行者の文脈に返る — 実績が裁量（監査率）を決める
+      try {
+        const cal = claims.calibrationLines(osDir, { classFp: t.class_fp || undefined });
+        if (cal.length) process.stdout.write('\n' + cal.join('\n') + '\n');
+      } catch {
+        // 較正台帳が未整備でもtask newを止めない
       }
       printHints(osDir);
       return 0;
@@ -763,7 +778,153 @@ const COMMANDS = {
       out({ task: id, evaluators }, args.flags);
       return 0;
     }
-    throw new Error('使い方: autopoiesys task new|brief|list|show|note|artifact|withdraw|plan|plan-verify|consolidate|set-evaluators');
+    // 納品。宣言（claims）の登録と即時反証の全held、評価ゲート緑を要求する。
+    // 検収待ちの宣言が残れば delivered、無ければ settled になる
+    if (sub === 'deliver') {
+      const id = args.positional[1];
+      if (!id) throw new Error('使い方: autopoiesys task deliver <id>');
+      const r = evaluate.deliver(osDir, id);
+      const shown = {
+        task: id,
+        status: r.status,
+        claims: r.delivery.claims,
+        held: r.delivery.held,
+        pending: r.delivery.pending,
+        unfalsifiable: r.delivery.unfalsifiable,
+      };
+      if (r.delivery.caveats) shown.caveats = r.delivery.caveats;
+      if (r.delivery.waived) shown.waived = r.delivery.waived;
+      out(shown, args.flags);
+      if (r.delivery.pending.length) {
+        process.stdout.write(
+          `\n検収待ちの宣言が${r.delivery.pending.length}件（${r.delivery.pending.join(', ')}）。` +
+          '現実が採点するまで完了ではない。結果が分かり次第 claim settle で記録すること\n'
+        );
+      }
+      if (r.delivery.unfalsifiable.length) {
+        process.stdout.write(
+          `\n開示: 反証手続きの無い宣言が${r.delivery.unfalsifiable.length}件（${r.delivery.unfalsifiable.join(', ')}）。` +
+          'この部分の乖離は測定できない — 完了報告に必ず転記すること\n'
+        );
+      }
+      if (r.delivery.caveats && r.delivery.caveats.length) {
+        process.stdout.write('\ncaveats（完了報告にそのまま転記する）:\n'
+          + r.delivery.caveats.map((c) => `  - ${c}`).join('\n') + '\n');
+      }
+      // 蒸留は納品前に済ませる規律だが、強制はしない。無言だけを許さない
+      const t = evaluate.getTask(osDir, id);
+      if (!t.consolidated) {
+        process.stdout.write(`\nヒント: 蒸留（task consolidate ${id}）が未記録のまま納品した。経験を生ログのまま捨てないこと\n`);
+      }
+      printHints(osDir);
+      return 0;
+    }
+    throw new Error('使い方: autopoiesys task new|brief|list|show|note|artifact|withdraw|plan|plan-verify|consolidate|set-evaluators|deliver');
+  },
+
+  // 宣言台帳（claims）: 納品物の主張と反証手続き。検収は現実が行う。
+  claim(args) {
+    const osDir = requireOsDir(args.flags);
+    const sub = args.positional[0];
+    const usage = '使い方: autopoiesys claim new <taskId> "<宣言の1文>" のいずれか1つ:\n' +
+      '          --argv \'["node","--test"]\' [--expect-exit 0] [--scope repo] [--timeout-ms n]（コマンドが剥がす）\n' +
+      '          --file-matches <path> --pattern <re> [--scope repo] | --file-not-matches <path> --pattern <re>\n' +
+      '          --deferred "<何がいつ剥がすか>" [--due YYYY-MM-DD]（現実・時間が採点する）\n' +
+      '          --user-settles "<何がいつ剥がすか>"（ユーザーの検収だけが採点できる）\n' +
+      '          --unfalsifiable "<なぜ反証手続きを書けないか>"（開示。納品記録に残る）\n' +
+      '        autopoiesys claim list [--task T00x] [--pending]\n' +
+      '        autopoiesys claim show <C000x>\n' +
+      '        autopoiesys claim settle <C000x> [--result held|broke --evidence "<現実の観測>" [--source s]]';
+    if (sub === 'new') {
+      const taskId = args.positional[1];
+      const body = args.positional.slice(2).join(' ');
+      if (!taskId || !body) throw new Error(usage);
+      let falsifier;
+      if (args.flags.argv) {
+        falsifier = { type: 'command', argv: JSON.parse(String(args.flags.argv)) };
+        if (args.flags['expect-exit'] !== undefined) falsifier.expect_exit = Number(args.flags['expect-exit']);
+        if (args.flags['timeout-ms'] !== undefined) falsifier.timeout_ms = Number(args.flags['timeout-ms']);
+      } else if (args.flags['file-matches'] || args.flags['file-not-matches']) {
+        const isMatch = !!args.flags['file-matches'];
+        falsifier = {
+          type: isMatch ? 'file_matches' : 'file_not_matches',
+          path: String(isMatch ? args.flags['file-matches'] : args.flags['file-not-matches']),
+          pattern: String(args.flags.pattern || ''),
+        };
+      } else if (args.flags.deferred) {
+        falsifier = { type: 'deferred', how: String(args.flags.deferred) };
+        if (args.flags.due) falsifier.due = String(args.flags.due);
+      } else if (args.flags['user-settles']) {
+        falsifier = { type: 'user', how: String(args.flags['user-settles']) };
+      }
+      if (falsifier && args.flags.scope) falsifier.scope = String(args.flags.scope);
+      const r = claims.newClaim(osDir, {
+        task: taskId,
+        body,
+        falsifier,
+        unfalsifiable_reason: args.flags.unfalsifiable ? String(args.flags.unfalsifiable) : undefined,
+      });
+      out(r, args.flags);
+      return 0;
+    }
+    if (sub === 'list') {
+      const { byId, byTask } = claims.loadClaims(osDir);
+      let list = args.flags.task ? (byTask[String(args.flags.task)] || []) : Object.values(byId);
+      if (args.flags.pending) list = list.filter((c) => c.state === 'pending');
+      out(list.map((c) => ({
+        id: c.id,
+        task: c.task,
+        state: c.state,
+        broke_ever: c.broke_ever || undefined,
+        body: c.body,
+        falsifier: c.falsifier ? c.falsifier.type : 'unfalsifiable',
+      })), args.flags);
+      return 0;
+    }
+    if (sub === 'show') {
+      out(claims.getClaim(osDir, args.positional[1]), args.flags);
+      return 0;
+    }
+    if (sub === 'settle') {
+      const id = args.positional[1];
+      if (!id) throw new Error(usage);
+      const r = claims.settleClaim(osDir, id, {
+        result: args.flags.result ? String(args.flags.result) : undefined,
+        evidence: args.flags.evidence ? [String(args.flags.evidence)] : undefined,
+        source: args.flags.source ? String(args.flags.source) : undefined,
+      });
+      out(r, args.flags);
+      if (r.result === 'broke') {
+        process.stdout.write(
+          '\n宣言が剥がれた。これは宣言と実際の乖離であり、較正に恒久に記録される。\n' +
+          (r.reopened ? 'タスクはopenへ戻した。' : '') +
+          '症状をFailureとして起票すること: node cli/index.js feedback "<症状>" --task <taskId>\n'
+        );
+      }
+      if (r.task_settled) {
+        process.stdout.write('\n全宣言の検収が確定した。タスクはsettledになった\n');
+      }
+      printHints(osDir);
+      return 0;
+    }
+    throw new Error(usage);
+  },
+
+  // 信用価格の開示: 較正実績と現在の監査率。実績が裁量を決める（実績以外の何も決めない）
+  trust(args) {
+    const osDir = requireOsDir(args.flags);
+    const cfg = schema.loadConfig(osDir);
+    const tc = claims.trustConfig(cfg);
+    const global = claims.calibration(osDir);
+    const result = { config: tc, global };
+    if (args.flags.class) {
+      const fp = taskclass.classFingerprint(String(args.flags.class));
+      result.class = { class: String(args.flags.class), ...claims.calibration(osDir, { classFp: fp }) };
+    }
+    out(result, args.flags);
+    const lines = claims.calibrationLines(osDir, {});
+    if (lines.length) process.stdout.write('\n' + lines.join('\n') + '\n');
+    return 0;
   },
 
   evaluate(args) {
@@ -792,6 +953,10 @@ const COMMANDS = {
     for (const x of r.results.filter((y) => y.skipped === 'unchanged')) {
       process.stdout.write(`\nヒント: ${x.evaluator} は再判定しなかった。${x.why}\n`);
     }
+    // 監査免除は較正実績が買った裁量。免除の事実と根拠を必ず見せる（黙って薄くしない）
+    for (const x of r.results.filter((y) => y.skipped === 'sampled_out')) {
+      process.stdout.write(`\n監査免除: ${x.evaluator}。${x.why}\n`);
+    }
     printHints(osDir);
     return 0;
   },
@@ -811,8 +976,9 @@ const COMMANDS = {
     if (!taskId) throw new Error('使い方: autopoiesys next-action <taskId>');
     const r = evaluate.nextAction(osDir, String(taskId));
     // caveatsは「evaluatorは全てPASSだが、この目的は測れていない」の宣言。
-    // 出力から落とすとDONEが「Goalが測れている」と読まれる
+    // 出力から落とすとDELIVERが「Goalが測れている」と読まれる
     const shown = { task: r.task, action: r.action, why: r.why, missing: r.missing };
+    if (r.waived) shown.waived = r.waived;
     if (r.caveats) shown.caveats = r.caveats;
     out(shown, args.flags);
     printHints(osDir);
@@ -1205,7 +1371,7 @@ World Model:    assert --file s.json / statement add|supersede|show / query [nam
                 ingest repo|rules|memory|knowledge|all [--scope S] [--repo D] [--check]
 知識源と到達性:  sources scan [--emit] / audit reachability
 Intelligence Graph: relate <s> <p> <o> "<説明>" / gap [--goal S00xx] [--assert] [--criteria-only]
-タスクと評価:   task new "<objective>" --class "<類型の1行>" [--repos <scope>[=<dir>],...]
+タスクと評価:   task new "<objective>" --verbatim "<依頼の原文>" --class "<類型の1行>" [--repos <scope>[=<dir>],...]
                          [--origin agenda:<ref>|failure:F00x|lesson:S00xx|unknown:S00xx|user]
                 task brief T（想起の束を取り直す）/ list|show|note|artifact
                 task withdraw T --reason "<誤登録の理由>"（何もしていないタスクに限る）
@@ -1213,6 +1379,13 @@ Intelligence Graph: relate <s> <p> <o> "<説明>" / gap [--goal S00xx] [--assert
                 task consolidate T --lessons S00x,... [--helped ..] [--misled ..]
                          [--unapplied .. --unapplied-reason "<理由>"]（蒸留）
                 evaluate --task T / verdict --file v.json / next-action T
+納品と検収:     claim new T "<宣言>" --argv '["node","--test"]' | --file-matches p --pattern re
+                         | --deferred "<何がいつ剥がすか>" [--due 日付] | --user-settles "<同>"
+                         | --unfalsifiable "<理由>"（反証手続きの無い宣言は開示必須）
+                claim list [--task T] [--pending] / claim show C000x
+                claim settle C000x [--result held|broke --evidence "<現実の観測>"]
+                task deliver T（納品。宣言と即時反証held、評価ゲート緑を要求）
+                trust [--class "<類型>"]（較正実績と監査率）
 成長:           growth [類型名の一部] （類型ごとの試行系列）
                 agenda [--limit N] （指示なしで次の仕事を出す）
                 experience audit T（蒸留申告の独立監査briefingを組む）

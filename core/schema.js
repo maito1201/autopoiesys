@@ -229,7 +229,7 @@ function checkAll(osDir, { now } = {}) {
   }
   // 未完了タスクのevaluator参照（大文字小文字の不一致はLinux移送時に初めて壊れるため、ここで検出する）
   for (const t of Object.values(loadTasks(osDir))) {
-    if (t.status === 'done') continue;
+    if (require('./evaluate').isCompleted(t)) continue;
     for (const evId of t.evaluators || []) {
       if (!evs.includes(evId)) {
         report.errors.push(`tasks ${t.id}: 存在しないevaluator参照: ${evId}（大文字小文字も一致が必要）`);
@@ -283,6 +283,10 @@ function checkAll(osDir, { now } = {}) {
   report.errors.push(...wm.errors);
   report.warnings.push(...wm.warnings);
   report.statement_count = wm.count;
+  // 宣言台帳の整合。壊れた参照を黙って落とすと「読めなかった」が「無かった」に化ける
+  const cl = require('./claims').lintClaims(osDir);
+  report.errors.push(...cl.errors);
+  report.claim_count = cl.count;
   report.failure_lint = failure.lint(osDir, { staleAfterDays: cfg.stale_after_days || 7, now });
   return report;
 }

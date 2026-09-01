@@ -278,7 +278,7 @@ function maintenanceHints(osDir, { now } = {}) {
       for (const d of byFp[fp].decisions) {
         if (!d.task || d.outcomes.length) continue;
         const t = tasksById[d.task];
-        if (!t || t.status !== 'done') continue;
+        if (!t || !require('./evaluate').isCompleted(t)) continue;
         pending.push(d.id);
       }
     }
@@ -308,7 +308,7 @@ function maintenanceHints(osDir, { now } = {}) {
     const audits = readJsonl(path.join(osDir, 'observations', 'goal_audit.jsonl'));
     const lastAudit = audits.length ? audits[audits.length - 1].ts : null;
     const doneSince = Object.values(require('./evaluate').loadTasks(osDir))
-      .filter((t) => t.status === 'done' && (!lastAudit || t.ts > lastAudit)).length;
+      .filter((t) => require('./evaluate').isCompleted(t) && (!lastAudit || t.ts > lastAudit)).length;
     if (doneSince >= 3) {
       hints.push(
         `ヒント: ${lastAudit ? '前回のgoal監査以降に' : 'goal監査が一度も無いまま'}タスクが${doneSince}件完了している。` +

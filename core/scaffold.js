@@ -42,6 +42,13 @@ routing:
     - conflicting_evidence
 budgets:
   research_tokens: 200000
+# 信用価格（裁量という賭け金）: 宣言の較正実績が良い類型のllm_judgeは
+# 抜き取り検査になる。floor = 最低監査率、min_history = 全数検査を外すのに要る検収数。
+# enabled: false で常に全数監査に戻せる。
+trust:
+  enabled: true
+  floor: 0.25
+  min_history: 5
 strict_vocabulary: false
 stale_after_days: 7
 regression_every_days: 7

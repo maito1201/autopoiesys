@@ -146,6 +146,26 @@ test('到達性監査: どのQueryからも引けないStatementを検出する'
   assert.strictEqual(r.violations, 1);
 });
 
+test('到達性監査: task_class付きlessonは想起（digest）経路で到達可能とみなす', () => {
+  const { osDir } = makeOs();
+  store.assertStatements(osDir, [
+    // どのQueryにも掛からないが、類型の再来時にdigestが必ず配信する
+    statement('S0001', 'lesson', 'worktreeは--reposで明示する', {
+      when: 'worktreeで作業するとき', task_class: 'abc12345',
+    }),
+    // task_classの無いlessonはQuery経路でしか届かない — 検出力を落とさない
+    statement('S0002', 'lesson', '類型に紐付いていない教訓', { when: 'いつか' }),
+  ]);
+  writeQuery(osDir, 'only_constraints', [
+    'pipeline:',
+    '  - select: { type: constraint }',
+    '  - project: [id, body]',
+  ]);
+  const r = auditReachability(osDir);
+  assert.deepStrictEqual(r.unreachable, ['S0002']);
+  assert.strictEqual(r.reached_via_digest, 1);
+});
+
 test('到達性監査: 必須paramの候補値をWorld Modelの実在値から導く', () => {
   const { osDir } = makeOs();
   store.assertStatements(osDir, [

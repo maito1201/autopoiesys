@@ -82,6 +82,23 @@ function preparePlanReview(osDir, task, planAbsPath, planRelPath) {
   parts.push('');
   parts.push(`## タスクのObjective: ${task.objective}`);
   parts.push('');
+  // 原文接地: 意図の曲解は言い換え（objective化）の瞬間に起きる。原文があれば、
+  // 計画の適合はまず原文に対して判定する — objectiveは実行者の言い換えである。
+  if (task.verbatim) {
+    parts.push('## ユーザー依頼の原文（登録時に固定・不可変）');
+    parts.push('');
+    parts.push('```');
+    parts.push(String(task.verbatim).trimEnd());
+    parts.push('```');
+    parts.push('');
+    parts.push('**Objectiveは実行者による言い換えである。** 計画がこの原文の意図から');
+    parts.push('逸れていないか（要求の縮小・すり替え）を、goal.yamlとの適合より先に確かめよ。');
+    parts.push('');
+  } else {
+    parts.push('（このタスクにはユーザー依頼の原文が記録されていない。');
+    parts.push('Objectiveが依頼の正確な写しかは検証できない）');
+    parts.push('');
+  }
   parts.push(...goalMaterial(osDir));
   parts.push(...policyMaterial(osDir, task));
   parts.push(`## 事前固定された計画（${planRelPath}）`);

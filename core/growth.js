@@ -111,7 +111,7 @@ function growthSeries(osDir) {
       tokens: tokensByTask[id] || 0,
       briefings: briefingsByTask[id] || 0,
       lessons_produced: lessonsProduced(t),
-      done: t.status === 'done',
+      done: require('./evaluate').isCompleted(t),
     });
   }
   return byClass;
