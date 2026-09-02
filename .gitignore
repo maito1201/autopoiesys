@@ -1,11 +1,7 @@
-# ユーザー固有OS — OSS本体と完全分離する（設計原則§22）。
-# .os/ はユーザー自身のリポジトリとして独立に履歴管理することを推奨。
-.os/
-
 node_modules/
-*.tmp-*
-
-# 非公開（設計の草稿と作業中のTODO。pushしない）
+# 前身（Intelligence OS）が残した生成物。知識は notahotel-knowledge へ移植済み
+.os/
+# 非公開の草稿
 CONCEPT.md
 CONCEPTv2.md
 TODO.md
