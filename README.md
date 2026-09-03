@@ -17,11 +17,12 @@ autopoiesys は、目的ごとに「いつ・何を読み・何を疑うか」�
 - `.claude/skills/run-task/` — 回路を通す。明示的に通したいときだけ。普段は CLAUDE.md の1行で届く
 - `.claude/skills/run-feedback/` — 回路を直す。不満の一言から、どの瞬間で知識が届かなかったかを突き止めて修正する
 - `template/` — 回路の初期形。CIRCUIT.md（瞬間の列）・INDEX.md（トピックの問い）・topics/（事実）・moments/（瞬間）・hypotheses.md（反証）。規約は template/README.md
+- `scripts/install.sh` — スキル4本を `~/.claude/skills` へ symlink する。一度だけ
 - `scripts/corrections.sh` — Claude Code の実行ログから本人の短い発話を日付付きで出す。訂正の束が瞬間の材料になる
 - `scripts/check.sh` — 回路が官僚化していないかを wc と grep で見る
 
 ## 使い方
 
-1. clone し、その中で Claude Code を起き、`/init-os`。最初の問いは「何ができるようになりたいですか」
+1. clone して `scripts/install.sh` を一度実行する（スキル4本を `~/.claude/skills` へ symlink）。以後どのリポジトリでも `/init-os` が使える。最初の問いは「何ができるようになりたいですか」
 2. 以後は配線された CLAUDE.md の1行が、依頼のたびに回路を届ける。スキルは要らない
 3. 結果が駄目なら `/run-feedback` に一言。回路が直る

@@ -6,6 +6,7 @@ description: 本人の不満・訂正から思考回路を直す。不満は一�
 # run-feedback — 回路を直す
 
 不満は回路の唯一の学習データ。本人に原因分析を求めない。「駄目だった」の一言で始める。
+autopoiesys の場所は `AP=$(realpath ~/.claude/skills/init-os)/../../..`。`scripts/` と `template/` はその直下。
 
 ## 手順
 

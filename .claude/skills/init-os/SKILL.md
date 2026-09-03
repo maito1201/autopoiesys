@@ -7,6 +7,7 @@ description: 目的ごとの思考回路を作る。まず本人のアウトカ�
 
 作るのは目的ごとのディレクトリ1つ（`template/` の形）と、CLAUDE.md の1行。回路はスキルに依存しない。
 背骨は `.claude/skills/anti-bureaucracy/SKILL.md`。この手順自身がまずそれに従う。
+autopoiesys の場所は `AP=$(realpath ~/.claude/skills/init-os)/../../..`。`scripts/` と `template/` はその直下。
 
 ## 1. アウトカムを確定する（まだ作らない）
 
@@ -39,7 +40,7 @@ anti-bureaucracy の 1〜4 を書いて見せる。アウトカムは本人や�
 
 - 回路を置き場所に書く。既存の器があるなら CIRCUIT.md を足し、README.md を template のものに差し替える
 - CLAUDE.md に1行: `思考回路: <path> — 依頼を受けたら CIRCUIT.md を読み、瞬間ごとに従う。分かったこと・訂正は書き戻す`
-- run-task / run-feedback を `~/.claude/skills/` へ symlink する（本人の承認後）
+- `scripts/install.sh` が未実行（`~/.claude/skills/init-os` が無い）なら実行する。以後どのリポジトリでも4スキルが使える
 - `scripts/check.sh <path>` が OK を返すこと
 
 ## 禁止

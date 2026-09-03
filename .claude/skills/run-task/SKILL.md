@@ -7,6 +7,7 @@ description: 思考回路に沿って1つの依頼を遂行する。CIRCUIT.md �
 
 回路は CLAUDE.md の「思考回路:」の行が指す場所。無ければ作業を始めず `/init-os` を提案する。
 このスキルは回路に書いてあることを繰り返さない。やるのは回路を最初から最後まで通すことだけ。
+autopoiesys の場所は `AP=$(realpath ~/.claude/skills/init-os)/../../..`。`scripts/` と `template/` はその直下。
 
 ## 手順
 
