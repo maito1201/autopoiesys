@@ -4,7 +4,7 @@ set -u
 K="${1:?usage: check.sh <circuit-dir>}"
 ng=0
 say(){ echo "NG: $*"; ng=1; }
-[ -f "$K/CIRCUIT.md" ] || say "CIRCUIT.md が無い（回路が無い。/init-os で作る）"
+[ -f "$K/CIRCUIT.md" ] || say "CIRCUIT.md が無い（回路が無い。/autopoiesys:init-os で作る）"
 [ -f "$K/CIRCUIT.md" ] && [ "$(wc -l < "$K/CIRCUIT.md")" -gt 60 ] && say "CIRCUIT.md が60行を超えた（足さずに削る）"
 [ -f "$K/CIRCUIT.md" ] && ! grep -q 'アウトカム' "$K/CIRCUIT.md" && say "CIRCUIT.md に瞬間0（アウトカムの確定）が無い"
 [ -f "$K/INDEX.md" ] || say "INDEX.md が無い"

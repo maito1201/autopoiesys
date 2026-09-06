@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Claude Code CLI
+        run: curl -fsSL https://claude.ai/install.sh | bash
+
+      - name: Add Claude Code to PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Validate plugin marketplace
+        run: claude plugin validate --strict .
+
+      - name: Check declared skill paths exist
+        run: |
+          jq -r '.plugins[].skills[]' .claude-plugin/marketplace.json | while read -r p; do
+            test -d "$p" || { echo "skills に宣言されたパスが無い: $p" >&2; exit 1; }
+          done
