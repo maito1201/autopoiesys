@@ -1,0 +1,15 @@
+{
+  "name": "autopoiesys",
+  "version": "0.1.0",
+  "description": "目的ごとの思考回路を作り（init-os）、回路を通し（run-task）、回路を直す（run-feedback）。作る前の判断は anti-bureaucracy plugin を先に入れる",
+  "author": { "name": "maito1201" },
+  "repository": "https://github.com/maito1201/autopoiesys",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "autopoiesys",
+    "shortDescription": "目的ごとの思考回路を作る",
+    "developerName": "maito1201",
+    "category": "Productivity",
+    "capabilities": ["Instructions"]
+  }
+}

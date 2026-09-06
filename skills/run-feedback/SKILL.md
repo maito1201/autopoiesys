@@ -6,7 +6,7 @@ description: 本人の不満・訂正から思考回路を直す。不満は一�
 # run-feedback — 回路を直す
 
 不満は回路の唯一の学習データ。本人に原因分析を求めない。「駄目だった」の一言で始める。
-autopoiesys は autopoiesys plugin として配布され、場所は `AP="${CLAUDE_PLUGIN_ROOT}"`。`scripts/` と `template/` はその直下。
+autopoiesys は plugin として配布される。場所 AP はこの SKILL.md の2階層上（`<AP>/skills/<name>/SKILL.md`）。Claude Code なら `${CLAUDE_PLUGIN_ROOT}` と同じ。`scripts/` と `template/` はその直下。
 
 ## 手順
 

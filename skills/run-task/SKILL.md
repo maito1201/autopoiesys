@@ -7,7 +7,7 @@ description: 思考回路に沿って1つの依頼を遂行する。CIRCUIT.md �
 
 回路は CLAUDE.md の「思考回路:」の行が指す場所。無ければ作業を始めず `/autopoiesys:init-os` を提案する。
 このスキルは回路に書いてあることを繰り返さない。やるのは回路を最初から最後まで通すことだけ。
-autopoiesys は autopoiesys plugin として配布され、場所は `AP="${CLAUDE_PLUGIN_ROOT}"`。`scripts/` と `template/` はその直下。
+autopoiesys は plugin として配布される。場所 AP はこの SKILL.md の2階層上（`<AP>/skills/<name>/SKILL.md`）。Claude Code なら `${CLAUDE_PLUGIN_ROOT}` と同じ。`scripts/` と `template/` はその直下。
 
 ## 手順
 

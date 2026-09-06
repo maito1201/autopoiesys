@@ -1,0 +1,12 @@
+{
+  "name": "autopoiesys",
+  "interface": { "displayName": "autopoiesys" },
+  "plugins": [
+    {
+      "name": "autopoiesys",
+      "source": { "source": "url", "url": "https://github.com/maito1201/autopoiesys.git", "ref": "master" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}

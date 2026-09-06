@@ -7,7 +7,7 @@ description: 目的ごとの思考回路を作る。まず本人のアウトカ�
 
 作るのは目的ごとのディレクトリ1つ（`template/` の形）と、CLAUDE.md の1行。回路はスキルに依存しない。
 背骨は anti-bureaucracy plugin（autopoiesys の依存として入り、毎セッション注入される）。この手順自身がまずそれに従う。
-autopoiesys は autopoiesys plugin として配布され、場所は `AP="${CLAUDE_PLUGIN_ROOT}"`。`scripts/` と `template/` はその直下。
+autopoiesys は plugin として配布される。場所 AP はこの SKILL.md の2階層上（`<AP>/skills/<name>/SKILL.md`）。Claude Code なら `${CLAUDE_PLUGIN_ROOT}` と同じ。`scripts/` と `template/` はその直下。
 
 ## 1. アウトカムを確定する（まだ作らない）
 

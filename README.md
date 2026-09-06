@@ -33,6 +33,15 @@ autopoiesys は anti-bureaucracy に依存しているので、3行目で両方�
 Claude Code を起動し直すと、3スキルが `/autopoiesys:init-os` などのコマンドとして使え、anti-bureaucracy の要求が毎セッション届く。以後どのリポジトリでも同じ。
 
 旧版の autopoiesys plugin を入れていた人は、`claude plugin update` では新しい依存が入らない。1行目のあと `claude plugin install autopoiesys@autopoiesys` を再実行すると anti-bureaucracy が一緒に入る。
+Codex CLI では plugin 間の依存が無いので、2つとも入れる（`.codex-plugin/plugin.json` と `.agents/plugins/marketplace.json` を同梱）。anti-bureaucracy の hook は `codex` の `/hooks` で信頼してから効く。スキルは `$autopoiesys:init-os` のように呼ぶ。
+
+```bash
+codex plugin marketplace add maito1201/anti-bureaucracy
+codex plugin add anti-bureaucracy@anti-bureaucracy
+codex plugin marketplace add maito1201/autopoiesys
+codex plugin add autopoiesys@autopoiesys
+```
+
 以前 `scripts/install.sh` でスキルを symlink していた人は、plugin 導入前に `~/.claude/skills/{anti-bureaucracy,init-os,run-feedback,run-task}` を削除する。置いたままにするとユーザースキルと plugin スキルの二重に読まれる。
 
 ## 使い方の流れ
