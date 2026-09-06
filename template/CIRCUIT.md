@@ -32,4 +32,4 @@ INDEX.md から関係するトピックを1〜3枚、丸ごと読む。hypothese
 
 コード・データ・本人を見て分かった直後に topics/ の既存ファイルへ統合する。本人の訂正は最も価値の高い1行。
 「いつ」がある教訓は moments/ へ。同じ訂正が2回目なら瞬間として回路に足す。1回目は topics に置く。
-規約は README.md。`scripts/check.sh <この回路>` で官僚化を見る。
+規約は README.md。autopoiesys plugin の `"$AP/scripts/check.sh" <この回路>`（AP は各スキル本文の autopoiesys の場所）で官僚化を見る。

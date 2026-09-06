@@ -6,7 +6,7 @@ description: 本人の不満・訂正から思考回路を直す。不満は一�
 # run-feedback — 回路を直す
 
 不満は回路の唯一の学習データ。本人に原因分析を求めない。「駄目だった」の一言で始める。
-autopoiesys の場所は `AP=$(realpath ~/.claude/skills/init-os)/../../..`。`scripts/` と `template/` はその直下。
+autopoiesys は autopoiesys plugin として配布され、場所は `AP="${CLAUDE_PLUGIN_ROOT}"`。`scripts/` と `template/` はその直下。
 
 ## 手順
 
@@ -16,7 +16,7 @@ autopoiesys の場所は `AP=$(realpath ~/.claude/skills/init-os)/../../..`。`s
    - 瞬間はあり、読んだが効かなかった → moments/ の中身を直す。何が書いてあれば防げたかを1行で
    - 瞬間が無かった → 1回目なら topics に置く。同じ型の2回目なら moments に新設し、CIRCUIT.md から指す
 3. hypotheses.md に該当する未観測行があれば末尾に「→ 観測 YYYY-MM-DD: 何が起きたか」を足す。無ければ、この症状が反証から漏れていた理由を1行で書く
-4. 直した後、CIRCUIT.md を差分ではなく全体で読み直す。60行を超えたら削る。`scripts/check.sh` を通す
+4. 直した後、CIRCUIT.md を差分ではなく全体で読み直す。60行を超えたら削る。`"$AP/scripts/check.sh" <回路path>` を通す
 5. 同じ瞬間が3回目なら、文言ではなく機械（Claude Code の hook）で届ける案を本人に出す。作るのは承認後
 
 ## 禁止

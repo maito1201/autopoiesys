@@ -1,0 +1,22 @@
+{
+  "name": "autopoiesys",
+  "owner": {
+    "name": "maito1201"
+  },
+  "metadata": {
+    "description": "目的ごとの思考回路を作り、回路を通し、回路を直す 4 スキルの集まり"
+  },
+  "plugins": [
+    {
+      "name": "autopoiesys",
+      "description": "anti-bureaucracy を背骨に、init-os で思考回路を作り、run-task で回路を通し、run-feedback で回路を直す。CIRCUIT.md / topics / moments / hypotheses の template とスクリプトを同梱する",
+      "source": "./",
+      "skills": [
+        "./skills/anti-bureaucracy",
+        "./skills/init-os",
+        "./skills/run-feedback",
+        "./skills/run-task"
+      ]
+    }
+  ]
+}

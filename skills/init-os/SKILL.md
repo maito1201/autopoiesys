@@ -6,8 +6,8 @@ description: 目的ごとの思考回路を作る。まず本人のアウトカ�
 # init-os — 思考回路を作る
 
 作るのは目的ごとのディレクトリ1つ（`template/` の形）と、CLAUDE.md の1行。回路はスキルに依存しない。
-背骨は `.claude/skills/anti-bureaucracy/SKILL.md`。この手順自身がまずそれに従う。
-autopoiesys の場所は `AP=$(realpath ~/.claude/skills/init-os)/../../..`。`scripts/` と `template/` はその直下。
+背骨は `${CLAUDE_PLUGIN_ROOT}/skills/anti-bureaucracy/SKILL.md`。この手順自身がまずそれに従う。
+autopoiesys は autopoiesys plugin として配布され、場所は `AP="${CLAUDE_PLUGIN_ROOT}"`。`scripts/` と `template/` はその直下。
 
 ## 1. アウトカムを確定する（まだ作らない）
 
@@ -23,7 +23,7 @@ anti-bureaucracy の 1〜4 を書いて見せる。アウトカムは本人や�
 ## 2. 広く集める
 
 アウトカムが認められたら、許された情報源をすべて当たる。何を集めるかはアウトカムが決める。
-1. 実行ログ: `scripts/corrections.sh ~/.claude/projects/<対象ディレクトリ>...` で本人の短い発話を出す。訂正・差し戻し・不満を拾い、同じ型を束ねる。束の件数と期間が瞬間の重みになる
+1. 実行ログ: `"$AP/scripts/corrections.sh" ~/.claude/projects/<対象ディレクトリ>...` で本人の短い発話を出す。訂正・差し戻し・不満を拾い、同じ型を束ねる。束の件数と期間が瞬間の重みになる
 2. リポジトリ: CLAUDE.md / README / docs / コード。CLAUDE.md にある事は写さず、指す1行にする
 3. Web・Notion・Slack: 許可された範囲。要約由来は `[要約 日付]` のままにし、確認済みにしない
 生の顧客名・連絡先・認証情報・秘密鍵を回路へ写さない。ログから写すのは蒸留した瞬間だけで、発話原文は残さず脚注に件数と日付を置く。
@@ -40,8 +40,8 @@ anti-bureaucracy の 1〜4 を書いて見せる。アウトカムは本人や�
 
 - 回路を置き場所に書く。既存の器があるなら CIRCUIT.md を足し、README.md を template のものに差し替える
 - CLAUDE.md に1行: `思考回路: <path> — 依頼を受けたら CIRCUIT.md を読み、瞬間ごとに従う。分かったこと・訂正は書き戻す`
-- `scripts/install.sh` が未実行（`~/.claude/skills/init-os` が無い）なら実行する。以後どのリポジトリでも4スキルが使える
-- `scripts/check.sh <path>` が OK を返すこと
+- 4スキルは plugin install で入る。この会話が起動したリポジトリに入っていなければユーザーに `claude plugin install autopoiesys@autopoiesys` を依頼する
+- `"$AP/scripts/check.sh" <path>` が OK を返すこと
 
 ## 禁止
 
