@@ -32,6 +32,7 @@ claude plugin install autopoiesys@autopoiesys
 autopoiesys は anti-bureaucracy に依存しているので、3行目で両方入る。1行目は依存先の marketplace を Claude Code に教えるためのもの。
 Claude Code を起動し直すと、3スキルが `/autopoiesys:init-os` などのコマンドとして使え、anti-bureaucracy の要求が毎セッション届く。以後どのリポジトリでも同じ。
 
+旧版の autopoiesys plugin を入れていた人は、`claude plugin update` では新しい依存が入らない。1行目のあと `claude plugin install autopoiesys@autopoiesys` を再実行すると anti-bureaucracy が一緒に入る。
 以前 `scripts/install.sh` でスキルを symlink していた人は、plugin 導入前に `~/.claude/skills/{anti-bureaucracy,init-os,run-feedback,run-task}` を削除する。置いたままにするとユーザースキルと plugin スキルの二重に読まれる。
 
 ## 使い方の流れ
