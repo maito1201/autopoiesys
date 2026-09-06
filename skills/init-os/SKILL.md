@@ -6,7 +6,7 @@ description: 目的ごとの思考回路を作る。まず本人のアウトカ�
 # init-os — 思考回路を作る
 
 作るのは目的ごとのディレクトリ1つ（`template/` の形）と、CLAUDE.md の1行。回路はスキルに依存しない。
-背骨は `${CLAUDE_PLUGIN_ROOT}/skills/anti-bureaucracy/SKILL.md`。この手順自身がまずそれに従う。
+背骨は anti-bureaucracy plugin（autopoiesys の依存として入り、毎セッション注入される）。この手順自身がまずそれに従う。
 autopoiesys は autopoiesys plugin として配布され、場所は `AP="${CLAUDE_PLUGIN_ROOT}"`。`scripts/` と `template/` はその直下。
 
 ## 1. アウトカムを確定する（まだ作らない）
@@ -40,7 +40,7 @@ anti-bureaucracy の 1〜4 を書いて見せる。アウトカムは本人や�
 
 - 回路を置き場所に書く。既存の器があるなら CIRCUIT.md を足し、README.md を template のものに差し替える
 - CLAUDE.md に1行: `思考回路: <path> — 依頼を受けたら CIRCUIT.md を読み、瞬間ごとに従う。分かったこと・訂正は書き戻す`
-- 4スキルは plugin install で入る。この会話が起動したリポジトリに入っていなければユーザーに `claude plugin install autopoiesys@autopoiesys` を依頼する
+- 3スキルと anti-bureaucracy は plugin install で入る。この会話が起動したリポジトリに入っていなければユーザーに `claude plugin install autopoiesys@autopoiesys` を依頼する（anti-bureaucracy は依存として一緒に入る）
 - `"$AP/scripts/check.sh" <path>` が OK を返すこと
 
 ## 禁止

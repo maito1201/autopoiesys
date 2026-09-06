@@ -4,18 +4,26 @@
     "name": "maito1201"
   },
   "metadata": {
-    "description": "目的ごとの思考回路を作り、回路を通し、回路を直す 4 スキルの集まり"
+    "description": "目的ごとの思考回路を作り、回路を通し、回路を直す 3 スキルの集まり。作る前の判断は anti-bureaucracy plugin に依存する"
   },
+  "allowCrossMarketplaceDependenciesOn": [
+    "anti-bureaucracy"
+  ],
   "plugins": [
     {
       "name": "autopoiesys",
-      "description": "anti-bureaucracy を背骨に、init-os で思考回路を作り、run-task で回路を通し、run-feedback で回路を直す。CIRCUIT.md / topics / moments / hypotheses の template とスクリプトを同梱する",
+      "description": "init-os で思考回路を作り、run-task で回路を通し、run-feedback で回路を直す。CIRCUIT.md / topics / moments / hypotheses の template とスクリプトを同梱する。背骨の anti-bureaucracy は依存 plugin として一緒に入る",
       "source": "./",
       "skills": [
-        "./skills/anti-bureaucracy",
         "./skills/init-os",
         "./skills/run-feedback",
         "./skills/run-task"
+      ],
+      "dependencies": [
+        {
+          "name": "anti-bureaucracy",
+          "marketplace": "anti-bureaucracy"
+        }
       ]
     }
   ]
