@@ -4,7 +4,7 @@
     "name": "maito1201"
   },
   "metadata": {
-    "description": "目的ごとの思考回路を作り、回路を通し、回路を直す 3 スキルの集まり。作る前の判断は anti-bureaucracy plugin に依存する"
+    "description": "目的ごとの覚え書きを作り（init-memory）、元のやり取りに照らして確かめ直す（dream）2 スキルの集まり。作る前の判断は anti-bureaucracy plugin に依存する"
   },
   "allowCrossMarketplaceDependenciesOn": [
     "anti-bureaucracy"
@@ -12,12 +12,11 @@
   "plugins": [
     {
       "name": "autopoiesys",
-      "description": "init-os で思考回路を作り、run-task で回路を通し、run-feedback で回路を直す。CIRCUIT.md / topics / moments / hypotheses の template とスクリプトを同梱する。背骨の anti-bureaucracy は依存 plugin として一緒に入る",
+      "description": "init-memory で覚え書きの入口と notes を作り、dream で覚え書きを元のやり取りとリポジトリに照らして直す。入口の template と、本人の発話を抜き出すスクリプトを同梱する。背骨の anti-bureaucracy は依存 plugin として一緒に入る",
       "source": "./",
       "skills": [
-        "./skills/init-os",
-        "./skills/run-feedback",
-        "./skills/run-task"
+        "./skills/init-memory",
+        "./skills/dream"
       ],
       "dependencies": [
         {
